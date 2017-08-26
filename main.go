@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"gopkg.in/couchbase/gocb.v1"
 	"log"
+	"time"
 )
 
 type Example struct {
@@ -98,25 +99,71 @@ func (e *Example) CopyBucket() (err error) {
 
 func (e *Example) AddXattrs() error {
 
+	k := "airline_10123"
+
+	cas, err := e.TargetBucket.Get(k, nil)
+	if err != nil {
+		return err
+	}
+
+	mutateFlag := gocb.SubdocDocFlagNone
+
+	xattrKey := "Metadata"
+	xattrVal := map[string]interface{}{
+		"DateCopied": time.Now(),
+	}
+	builder := e.TargetBucket.MutateInEx(k, mutateFlag, gocb.Cas(cas), uint32(0)).
+		UpsertEx(xattrKey, xattrVal, gocb.SubdocFlagXattr)                                                // Update the xattr
+
+	docFragment, err := builder.Execute()
+	if err != nil {
+		return err
+	}
+	log.Printf("docFragment: %+v", docFragment)
+
 
 	return nil
 
 }
 
+func (e *Example) GetXattrs() error {
+
+	k := "airline_10123"
+
+	xattrKey := "Metadata"
+
+	res, err := e.TargetBucket.LookupIn(k).
+		GetEx(xattrKey, gocb.SubdocFlagXattr).
+		Execute()
+	if err != nil {
+		return err
+	}
+
+	xattrVal := map[string]interface{}{}
+	res.Content(xattrKey, &xattrVal)
+
+	log.Printf("xattrVal: %+v", xattrVal)
+
+	return nil
+
+}
 
 func main() {
 
 	e := NewExample()
 	e.Connect("couchbase://localhost")
 
-	if err := e.CopyBucket(); err != nil {
-		panic(fmt.Errorf("Error: %v", err))
-	}
+	//if err := e.CopyBucket(); err != nil {
+	//	panic(fmt.Errorf("Error: %v", err))
+	//}
 
 	if err := e.AddXattrs(); err != nil {
 		panic(fmt.Errorf("Error: %v", err))
 	}
 
+	if err := e.GetXattrs(); err != nil {
+		panic(fmt.Errorf("Error: %v", err))
+	}
 
 
 
