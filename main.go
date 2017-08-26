@@ -81,6 +81,7 @@ func (e *ExampleApp) CopyBucketAddXATTRS() (err error) {
 
 		xattrVal := map[string]interface{}{
 			"DateCopied": time.Now(),
+			"UpstreamSource": e.SourceBucket.Name(),
 		}
 		builder := e.TargetBucket.MutateInEx(docId, mutateFlag, gocb.Cas(cas), uint32(0)).
 			UpsertEx(xattrKey, xattrVal, gocb.SubdocFlagXattr) // Update the xattr
