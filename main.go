@@ -9,50 +9,54 @@ import (
 
 type Example struct {
 	ClusterConnection *gocb.Cluster
-
+	SourceBucket *gocb.Bucket
+	TargetBucket *gocb.Bucket
 }
 
-func NewExample() {
+func NewExample() *Example {
 	return &Example{}
 }
 
-func (e *Example) Connect(connSpecStr string) error {
+func (e *Example) Connect(connSpecStr string) (err error) {
 
+	e.ClusterConnection, err = gocb.Connect(connSpecStr)
+	if err != nil {
+		return err
+	}
+
+	e.SourceBucket, err = e.ClusterConnection.OpenBucket("travel-sample", "password")
+	if err != nil {
+		return err
+	}
+
+	e.TargetBucket, err = e.ClusterConnection.OpenBucket("travel-sample-copy", "password")
+	if err != nil {
+		return err
+	}
+
+	return nil
 }
 
-func CopyBucket() error {
+func (e *Example) CopyBucket() error {
 
-	cluster, err := gocb.Connect("couchbase://localhost")
-	if err != nil {
-		return err
-	}
 
-	sourceBucket, err := cluster.OpenBucket("travel-sample", "password")
-	if err != nil {
-		return err
-	}
-
-	targetBucket, err := cluster.OpenBucket("travel-sample-copy", "password")
-	if err != nil {
-		return err
-	}
 
 	result := map[string]interface{}{}
-	_, err = sourceBucket.Get("airline_10", &result)
+	_, err = e.SourceBucket.Get("airline_10", &result)
 	if err != nil {
 		return err
 	}
 
 	log.Printf("Result: %+v", result)
 
-	err = sourceBucket.Manager("", "").CreatePrimaryIndex("", true, false)
+	err = e.SourceBucket.Manager("", "").CreatePrimaryIndex("", true, false)
 	if err != nil {
 		return err
 	}
 
 	// Get the doc ID and the doc body in a single query
 	query := gocb.NewN1qlQuery("SELECT META(`travel-sample`).id,* FROM `travel-sample`")
-	rows, err := sourceBucket.ExecuteN1qlQuery(query, nil)
+	rows, err := e.SourceBucket.ExecuteN1qlQuery(query, nil)
 	if err != nil {
 		return err
 	}
@@ -83,7 +87,7 @@ func CopyBucket() error {
 		}
 		log.Printf("docRaw: %+v", docRaw)
 
-		_, err := targetBucket.Insert(rowIdStr, docRaw, 0)
+		_, err := e.TargetBucket.Insert(rowIdStr, docRaw, 0)
 		if err != nil {
 			return err
 		}
@@ -95,18 +99,24 @@ func CopyBucket() error {
 
 }
 
+func (e *Example) AddXattrs() error {
 
+	
+	return nil
+
+}
 
 
 func main() {
 
-	err := CopyBucket()
-	if err != nil {
+	e := NewExample()
+	e.Connect("couchbase://localhost")
+
+	if err := e.CopyBucket(); err != nil {
 		panic(fmt.Errorf("Error: %v", err))
 	}
 
-	err := AddXattrs()
-	if err != nil {
+	if err := e.AddXattrs(); err != nil {
 		panic(fmt.Errorf("Error: %v", err))
 	}
 
