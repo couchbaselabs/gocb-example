@@ -37,9 +37,7 @@ func (e *Example) Connect(connSpecStr string) (err error) {
 	return nil
 }
 
-func (e *Example) CopyBucket() error {
-
-
+func (e *Example) CopyBucket() (err error) {
 
 	result := map[string]interface{}{}
 	_, err = e.SourceBucket.Get("airline_10", &result)
@@ -65,7 +63,6 @@ func (e *Example) CopyBucket() error {
 	// row := TravelSampleRow{}
 	row := map[string]interface{}{}
 	for rows.Next(&row) {
-
 
 		// fmt.Printf("Row: %+v\n", row)
 
@@ -101,7 +98,7 @@ func (e *Example) CopyBucket() error {
 
 func (e *Example) AddXattrs() error {
 
-	
+
 	return nil
 
 }
