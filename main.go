@@ -1,6 +1,5 @@
 package main
 
-
 import (
 	"fmt"
 	"gopkg.in/couchbase/gocb.v1"
@@ -10,8 +9,8 @@ import (
 
 type Example struct {
 	ClusterConnection *gocb.Cluster
-	SourceBucket *gocb.Bucket
-	TargetBucket *gocb.Bucket
+	SourceBucket      *gocb.Bucket
+	TargetBucket      *gocb.Bucket
 }
 
 func NewExample() *Example {
@@ -60,7 +59,6 @@ func (e *Example) CopyBucket() (err error) {
 		return err
 	}
 
-
 	// row := TravelSampleRow{}
 	row := map[string]interface{}{}
 	for rows.Next(&row) {
@@ -90,7 +88,6 @@ func (e *Example) CopyBucket() (err error) {
 			return err
 		}
 
-
 	}
 
 	return nil
@@ -113,14 +110,13 @@ func (e *Example) AddXattrs() error {
 		"DateCopied": time.Now(),
 	}
 	builder := e.TargetBucket.MutateInEx(k, mutateFlag, gocb.Cas(cas), uint32(0)).
-		UpsertEx(xattrKey, xattrVal, gocb.SubdocFlagXattr)                                                // Update the xattr
+		UpsertEx(xattrKey, xattrVal, gocb.SubdocFlagXattr) // Update the xattr
 
 	docFragment, err := builder.Execute()
 	if err != nil {
 		return err
 	}
 	log.Printf("docFragment: %+v", docFragment)
-
 
 	return nil
 
@@ -148,6 +144,27 @@ func (e *Example) GetXattrs() error {
 
 }
 
+func (e *Example) GetSubdocTypeField() error {
+
+	k := "airline_10123"
+
+	subdocKey := "type"
+
+	var retValue interface{}
+
+	frag, err := e.TargetBucket.LookupIn(k).Get(subdocKey).Execute()
+	if err != nil {
+		return err
+	}
+	frag.Content(subdocKey, &retValue)
+
+	log.Printf("retVal: %+v", retValue)
+
+	return nil
+
+
+}
+
 func main() {
 
 	e := NewExample()
@@ -165,6 +182,9 @@ func main() {
 		panic(fmt.Errorf("Error: %v", err))
 	}
 
+	if err := e.GetSubdocTypeField(); err != nil {
+		panic(fmt.Errorf("Error: %v", err))
+	}
 
 
 }
