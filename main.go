@@ -35,6 +35,11 @@ func (e *Example) Connect(connSpecStr string) (err error) {
 		return err
 	}
 
+	err = e.SourceBucket.Manager("", "").CreatePrimaryIndex("", true, false)
+	if err != nil {
+		return err
+	}
+
 	return nil
 }
 
@@ -44,18 +49,7 @@ type DocProcessor func(docId string) error
 
 func (e *Example) CopyBucket(postInsertCallback DocProcessor) (err error) {
 
-	result := map[string]interface{}{}
-	_, err = e.SourceBucket.Get("airline_10", &result)
-	if err != nil {
-		return err
-	}
-
-	log.Printf("Result: %+v", result)
-
-	err = e.SourceBucket.Manager("", "").CreatePrimaryIndex("", true, false)
-	if err != nil {
-		return err
-	}
+	log.Printf("Copying source bucket -> target bucket")
 
 	// Get the doc ID and the doc body in a single query
 	query := gocb.NewN1qlQuery("SELECT META(`travel-sample`).id,* FROM `travel-sample`")
@@ -99,34 +93,6 @@ func (e *Example) CopyBucket(postInsertCallback DocProcessor) (err error) {
 
 }
 
-//func (e *Example) AddXattrs() error {
-//
-//	k := "airline_10123"
-//
-//	cas, err := e.TargetBucket.Get(k, nil)
-//	if err != nil {
-//		return err
-//	}
-//
-//	mutateFlag := gocb.SubdocDocFlagNone
-//
-//	xattrKey := "Metadata"
-//	xattrVal := map[string]interface{}{
-//		"DateCopied": time.Now(),
-//	}
-//	builder := e.TargetBucket.MutateInEx(k, mutateFlag, gocb.Cas(cas), uint32(0)).
-//		UpsertEx(xattrKey, xattrVal, gocb.SubdocFlagXattr) // Update the xattr
-//
-//	docFragment, err := builder.Execute()
-//	if err != nil {
-//		return err
-//	}
-//	log.Printf("docFragment: %+v", docFragment)
-//
-//	return nil
-//
-//}
-
 func (e *Example) GetXattrs(docId, xattrKey string) (xattrVal interface{}, err error) {
 
 	res, err := e.TargetBucket.LookupIn(docId).
@@ -151,9 +117,7 @@ func (e *Example) GetSubdocField(docId, subdocKey string) (retValue interface{},
 	}
 	frag.Content(subdocKey, &retValue)
 
-
 	return retValue, nil
-
 
 }
 
@@ -176,6 +140,8 @@ func (e *Example) ForEachDocInTargetBucket(postInsertCallback DocProcessor) (err
 }
 
 func (e *Example) ForEachDocInBucket(docProcessor DocProcessor, bucket *gocb.Bucket) (err error) {
+
+	log.Printf("Performing operation over bucket: %v", bucket.Name())
 
 	// Get the doc ID and the doc body in a single query
 	query := gocb.NewN1qlQuery("SELECT META(`travel-sample`).id,* FROM `travel-sample`")
@@ -243,14 +209,11 @@ func main() {
 
 	log.Printf("postInsertCallback: %v", postInsertCallback)
 
-	//// Copy the bucket and pass the post-insert callback function
-	//if err := e.CopyBucket(postInsertCallback); err != nil {
-	//	panic(fmt.Errorf("Error: %v", err))
-	//}
+	// Copy the bucket and pass the post-insert callback function
+	if err := e.CopyBucket(postInsertCallback); err != nil {
+		panic(fmt.Errorf("Error: %v", err))
+	}
 
-	//if err := e.AddXattrs(); err != nil {
-	//	panic(fmt.Errorf("Error: %v", err))
-	//}
 
 	xattrVal, err := e.GetXattrs("airline_10123", xattrKey)
 	if err != nil {
