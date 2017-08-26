@@ -7,6 +7,7 @@ import (
 	"time"
 )
 
+
 type Example struct {
 	ClusterConnection *gocb.Cluster
 	SourceBucket      *gocb.Bucket
@@ -37,7 +38,11 @@ func (e *Example) Connect(connSpecStr string) (err error) {
 	return nil
 }
 
-func (e *Example) CopyBucket() (err error) {
+
+// A function that takes a doc id and returns an error
+type PostInsertCallback func(docId string) error
+
+func (e *Example) CopyBucket(postInsertCallback PostInsertCallback) (err error) {
 
 	result := map[string]interface{}{}
 	_, err = e.SourceBucket.Get("airline_10", &result)
@@ -59,11 +64,8 @@ func (e *Example) CopyBucket() (err error) {
 		return err
 	}
 
-	// row := TravelSampleRow{}
 	row := map[string]interface{}{}
 	for rows.Next(&row) {
-
-		// fmt.Printf("Row: %+v\n", row)
 
 		// Get row ID
 		rowIdRaw, ok := row["id"]
@@ -74,17 +76,20 @@ func (e *Example) CopyBucket() (err error) {
 		if !ok {
 			return fmt.Errorf("Row id field not of expected type")
 		}
-		log.Printf("rowID: %v\n", rowIdStr)
 
 		// Get row document
 		docRaw, ok := row["travel-sample"]
 		if !ok {
 			return fmt.Errorf("Row does not have doc field")
 		}
-		log.Printf("docRaw: %+v", docRaw)
 
 		_, err := e.TargetBucket.Insert(rowIdStr, docRaw, 0)
 		if err != nil {
+			return err
+		}
+
+		// Invoke the post-insert callback
+		if err := postInsertCallback(rowIdStr); err != nil {
 			return err
 		}
 
@@ -94,97 +99,124 @@ func (e *Example) CopyBucket() (err error) {
 
 }
 
-func (e *Example) AddXattrs() error {
+//func (e *Example) AddXattrs() error {
+//
+//	k := "airline_10123"
+//
+//	cas, err := e.TargetBucket.Get(k, nil)
+//	if err != nil {
+//		return err
+//	}
+//
+//	mutateFlag := gocb.SubdocDocFlagNone
+//
+//	xattrKey := "Metadata"
+//	xattrVal := map[string]interface{}{
+//		"DateCopied": time.Now(),
+//	}
+//	builder := e.TargetBucket.MutateInEx(k, mutateFlag, gocb.Cas(cas), uint32(0)).
+//		UpsertEx(xattrKey, xattrVal, gocb.SubdocFlagXattr) // Update the xattr
+//
+//	docFragment, err := builder.Execute()
+//	if err != nil {
+//		return err
+//	}
+//	log.Printf("docFragment: %+v", docFragment)
+//
+//	return nil
+//
+//}
 
-	k := "airline_10123"
+func (e *Example) GetXattrs(docId, xattrKey string) (xattrVal interface{}, err error) {
 
-	cas, err := e.TargetBucket.Get(k, nil)
-	if err != nil {
-		return err
-	}
-
-	mutateFlag := gocb.SubdocDocFlagNone
-
-	xattrKey := "Metadata"
-	xattrVal := map[string]interface{}{
-		"DateCopied": time.Now(),
-	}
-	builder := e.TargetBucket.MutateInEx(k, mutateFlag, gocb.Cas(cas), uint32(0)).
-		UpsertEx(xattrKey, xattrVal, gocb.SubdocFlagXattr) // Update the xattr
-
-	docFragment, err := builder.Execute()
-	if err != nil {
-		return err
-	}
-	log.Printf("docFragment: %+v", docFragment)
-
-	return nil
-
-}
-
-func (e *Example) GetXattrs() error {
-
-	k := "airline_10123"
-
-	xattrKey := "Metadata"
-
-	res, err := e.TargetBucket.LookupIn(k).
+	res, err := e.TargetBucket.LookupIn(docId).
 		GetEx(xattrKey, gocb.SubdocFlagXattr).
 		Execute()
 	if err != nil {
-		return err
+		return nil, err
 	}
 
-	xattrVal := map[string]interface{}{}
 	res.Content(xattrKey, &xattrVal)
 
-	log.Printf("xattrVal: %+v", xattrVal)
-
-	return nil
+	return xattrVal, nil
 
 }
 
-func (e *Example) GetSubdocTypeField() error {
+func (e *Example) GetSubdocField(docId, subdocKey string) (retValue interface{}, err error) {
 
-	k := "airline_10123"
 
-	subdocKey := "type"
-
-	var retValue interface{}
-
-	frag, err := e.TargetBucket.LookupIn(k).Get(subdocKey).Execute()
+	frag, err := e.TargetBucket.LookupIn(docId).Get(subdocKey).Execute()
 	if err != nil {
-		return err
+		return nil, err
 	}
 	frag.Content(subdocKey, &retValue)
 
-	log.Printf("retVal: %+v", retValue)
 
-	return nil
+	return retValue, nil
 
 
 }
 
 func main() {
 
+	// Create an example application and connect to a couchbase cluster
 	e := NewExample()
 	e.Connect("couchbase://localhost")
 
-	//if err := e.CopyBucket(); err != nil {
+	// Create a post-insert callback function that will be invoked on
+	// every document that is copied from the source bucket and inserted into the target bucket.
+	xattrKey := "Metadata"
+	postInsertCallback := func(docId string) error {
+
+		cas, err := e.TargetBucket.Get(docId, nil)
+		if err != nil {
+			return err
+		}
+
+		mutateFlag := gocb.SubdocDocFlagNone
+
+		xattrVal := map[string]interface{}{
+			"DateCopied": time.Now(),
+		}
+		builder := e.TargetBucket.MutateInEx(docId, mutateFlag, gocb.Cas(cas), uint32(0)).
+			UpsertEx(xattrKey, xattrVal, gocb.SubdocFlagXattr) // Update the xattr
+
+		_, err = builder.Execute()
+		if err != nil {
+			return err
+		}
+
+		return nil
+	}
+
+	log.Printf("postInsertCallback: %v", postInsertCallback)
+
+	//// Copy the bucket and pass the post-insert callback function
+	//if err := e.CopyBucket(postInsertCallback); err != nil {
 	//	panic(fmt.Errorf("Error: %v", err))
 	//}
 
-	if err := e.AddXattrs(); err != nil {
+	//if err := e.AddXattrs(); err != nil {
+	//	panic(fmt.Errorf("Error: %v", err))
+	//}
+
+
+	xattrVal, err := e.GetXattrs("airline_10123", xattrKey)
+	if err != nil {
+		panic(fmt.Errorf("Error: %v", err))
+	}
+	log.Printf("xattrVal: %+v", xattrVal)
+
+
+	retValue, err := e.GetSubdocField("airline_10123", "type")
+	if err != nil {
 		panic(fmt.Errorf("Error: %v", err))
 	}
 
-	if err := e.GetXattrs(); err != nil {
-		panic(fmt.Errorf("Error: %v", err))
-	}
+	log.Printf("retVal: %+v", retValue)
 
-	if err := e.GetSubdocTypeField(); err != nil {
-		panic(fmt.Errorf("Error: %v", err))
-	}
+
+	// Iterate over all docs and update the type field to app:<existing_type>
 
 
 }
