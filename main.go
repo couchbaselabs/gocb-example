@@ -46,7 +46,7 @@ type ExampleApp struct {
 // Create a new ExampleApp
 func NewExample(sourceBucketSpec, targetBucketSpec BucketSpec) *ExampleApp {
 	return &ExampleApp{
-		UseN1ql:          true,
+		UseN1ql:          false,
 		SourceBucketSpec: sourceBucketSpec,
 		TargetBucketSpec: targetBucketSpec,
 	}
@@ -132,6 +132,7 @@ func (e *ExampleApp) Connect(connSpecStr string) (err error) {
 	return nil
 }
 
+// Copies source bucket to target bucket, inserting XATTRS in target docs
 func (e *ExampleApp) CopyBucketAddXATTRS() (err error) {
 
 	// Create a post-insert callback function that will be invoked on
@@ -141,20 +142,24 @@ func (e *ExampleApp) CopyBucketAddXATTRS() (err error) {
 
 		for _, docId := range docIds {
 
+			// Get existing doc in order to get CAS
 			cas, err := e.TargetBucket.Get(docId, nil)
 			if err != nil {
 				return err
 			}
 
-			mutateFlag := gocb.SubdocDocFlagNone
-
+			// The XATTR value contains metadata about the document: the bucket it was originally copied from
+			// as well as the date it was copied.
 			xattrVal := map[string]interface{}{
 				"DateCopied":     time.Now(),
 				"UpstreamSource": e.SourceBucket.Name(),
 			}
-			builder := e.TargetBucket.MutateInEx(docId, mutateFlag, gocb.Cas(cas), uint32(0)).
-				UpsertEx(xattrKey, xattrVal, gocb.SubdocFlagXattr) // Update the xattr
 
+			// Create CAS-safe XATTR mutation
+			builder := e.TargetBucket.MutateInEx(docId, gocb.SubdocDocFlagNone, gocb.Cas(cas), uint32(0)).
+				UpsertEx(xattrKey, xattrVal, gocb.SubdocFlagXattr)
+
+			// Execute mutation
 			_, err = builder.Execute()
 			if err != nil {
 				return err
@@ -183,91 +188,6 @@ func (e *ExampleApp) CopyBucket() (err error) {
 	return nil
 }
 
-func (e *ExampleApp) CopyBucketBatching() (err error) {
-
-	viewQuery := gocb.NewViewQuery(designDoc, viewName)
-
-	// TODO: if this page size is larger, it will return "panic: Error: queue overflowed" when doing bulk inserts.  Should handle that case.
-	pageSize := uint(1000)
-	skip := uint(0)
-
-	for {
-
-		viewQuery.Limit(pageSize)
-		viewQuery.Skip(skip)
-
-		log.Printf("Calling ExecuteViewQuery: %v", viewQuery)
-		viewResults, err := e.SourceBucket.ExecuteViewQuery(viewQuery)
-		if err != nil {
-			return fmt.Errorf("Error executing viewQuery: %v.  Err: %v", viewQuery, err)
-		}
-
-		var items []gocb.BulkOp
-
-		numResultsProcessed := 0
-		row := map[string]interface{}{}
-		for {
-
-			if gotRow := viewResults.Next(&row); gotRow == false {
-				log.Printf("No more rows in view result.")
-				if numResultsProcessed == 0 {
-					// No point in going to the next page, since this page had 0 results
-					return nil
-				}
-				// We've processed all results in this page, break out of inner for loop to process another page of results
-				break
-			}
-
-			// Get row ID
-			rowIdRaw, ok := row["id"]
-			if !ok {
-				return fmt.Errorf("Row does not have id field")
-			}
-			rowIdStr, ok := rowIdRaw.(string)
-			if !ok {
-				return fmt.Errorf("Row id field not of expected type")
-			}
-
-			// Get row document
-			docRaw, ok := row["value"]
-			if !ok {
-				return fmt.Errorf("Row does not have doc field: %+v.  Row: %+v", e.SourceBucket.Name(), row)
-			}
-
-			item := &gocb.InsertOp{
-				Key:   rowIdStr,
-				Value: docRaw,
-			}
-			items = append(items, item)
-
-			skip += 1
-			numResultsProcessed += 1
-
-		}
-
-		// Do the underlying bulk operation
-		log.Printf("Inserting %v items", len(items))
-		if err := e.TargetBucket.Do(items); err != nil {
-			return err
-		}
-		log.Printf("Inserted %v items", len(items))
-
-		// Make sure all bulk ops succeeded
-		for _, item := range items {
-			insertItem := item.(*gocb.InsertOp)
-			if insertItem.Err != nil {
-				return insertItem.Err
-			}
-		}
-
-		log.Printf("%v items inserted successfully", len(items))
-
-	}
-
-	return nil
-
-}
-
 func TableScanN1qlQuery(bucketName string) string {
 	// Get the doc ID and the doc body in a single query -- eg:
 	// "SELECT META(`travel-sample`).id,* FROM `travel-sample`"
@@ -284,26 +204,54 @@ func (e *ExampleApp) CopyBucketWithCallback(postInsertCallback DocProcessor) (er
 	// A docprocesser callback that *wraps* the postInsertCallback to do the following:
 	// - Insert the doc into the target bucket
 	// - Invoke the postInsertCallback
-	copyEachDoc := func(docId []string, doc []interface{}) error {
+	copyEachDoc := func(docIds []string, docs []interface{}) error {
 
-		switch len(docId) {
+		switch len(docIds) {
 		case 1:
 
 			// Insert the doc into the target bucket
-			_, err := e.TargetBucket.Insert(docId[0], doc[0], 0)
+			_, err := e.TargetBucket.Insert(docIds[0], docs[0], 0)
 			if err != nil {
-				return fmt.Errorf("Error inserting doc id: %v.  Err: %v", docId, err)
+				return fmt.Errorf("Error inserting doc id: %v.  Err: %v", docIds[0], err)
 			}
 
 			if postInsertCallback != nil {
-				return postInsertCallback(docId, doc)
+				return postInsertCallback(docIds, docs)
 			}
 
 			return nil
 
 		default:
 
-			// TODO: bulk ops
+			// copy docs via bulk ops
+			var items []gocb.BulkOp
+
+			for i, docId := range docIds {
+				item := &gocb.InsertOp{
+					Key:   docId,
+					Value: docs[i],
+				}
+				items = append(items, item)
+			}
+
+			// Do the underlying bulk operation
+			log.Printf("Inserting %v items", len(items))
+			if err := e.TargetBucket.Do(items); err != nil {
+				return err
+			}
+			log.Printf("Inserted %v items", len(items))
+
+			// Make sure all bulk ops succeeded
+			for _, item := range items {
+				insertItem := item.(*gocb.InsertOp)
+				if insertItem.Err != nil {
+					return insertItem.Err
+				}
+			}
+
+			if postInsertCallback != nil {
+				return postInsertCallback(docIds, docs)
+			}
 
 			return nil
 
@@ -422,7 +370,8 @@ func (e *ExampleApp) ForEachDocIdBucketViews(docProcessor DocProcessor, bucket *
 
 	viewQuery := gocb.NewViewQuery(designDoc, viewName)
 
-	pageSize := uint(10000)
+	//	// TODO: if this page size is larger, it will return "panic: Error: queue overflowed" when doing bulk inserts.  Should handle that case.
+	pageSize := uint(1000)
 	skip := uint(0)
 
 	for {
@@ -438,6 +387,9 @@ func (e *ExampleApp) ForEachDocIdBucketViews(docProcessor DocProcessor, bucket *
 
 		numResultsProcessed := 0
 		row := map[string]interface{}{}
+		docIds := []string{}
+		docs := []interface{}{}
+
 		for {
 
 			if gotRow := viewResults.Next(&row); gotRow == false {
@@ -466,14 +418,17 @@ func (e *ExampleApp) ForEachDocIdBucketViews(docProcessor DocProcessor, bucket *
 				return fmt.Errorf("Row does not have doc field: %+v.  Row: %+v", bucket.Name(), row)
 			}
 
-			// Invoke the doc processor callback
-			if err := docProcessor([]string{rowIdStr}, []interface{}{docRaw}); err != nil {
-				return err
-			}
+			docIds = append(docIds, rowIdStr)
+			docs = append(docs, docRaw)
 
 			skip += 1
 			numResultsProcessed += 1
 
+		}
+
+		// Invoke the doc processor callback
+		if err := docProcessor(docIds, docs); err != nil {
+			return err
 		}
 
 	}
@@ -533,7 +488,7 @@ func main() {
 	// ----------------------------- Copy Source Bucket -> Target Bucket -----------------------------------------------
 
 	// Copy the source bucket to the target bucket, adding XATTRS during the process
-	if err := e.CopyBucketAddXATTRS(); err != nil { // TODO: change back to CopyBucketXattrs
+	if err := e.CopyBucketAddXATTRS(); err != nil {
 		panic(fmt.Errorf("Error: %v", err))
 	}
 
