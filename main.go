@@ -2,9 +2,11 @@ package main
 
 import (
 	"fmt"
-	"gopkg.in/couchbase/gocb.v1"
 	"log"
+	"os"
 	"time"
+
+	"gopkg.in/couchbase/gocb.v1"
 )
 
 const (
@@ -24,8 +26,9 @@ const (
 type DocProcessor func(docId string, doc interface{}) error
 
 type BucketSpec struct {
-	Name     string
-	Password string
+	Name          string
+	Password      string
+	AdminPassword string // Used to create bucket manager for adding views
 }
 
 // A struct to keep references to the cluster connection and open buckets
@@ -42,9 +45,9 @@ type ExampleApp struct {
 }
 
 // Create a new ExampleApp
-func NewExample(sourceBucketSpec, targetBucketSpec BucketSpec, ) *ExampleApp {
+func NewExample(sourceBucketSpec, targetBucketSpec BucketSpec) *ExampleApp {
 	return &ExampleApp{
-		UseN1ql: false,
+		UseN1ql:          false,
 		SourceBucketSpec: sourceBucketSpec,
 		TargetBucketSpec: targetBucketSpec,
 	}
@@ -91,7 +94,7 @@ func (e *ExampleApp) Connect(connSpecStr string) (err error) {
 			return err
 		}
 
-	case false:  // use views
+	case false: // use views
 
 		// Create design doc
 		gocbDesignDoc := &gocb.DesignDocument{
@@ -100,10 +103,11 @@ func (e *ExampleApp) Connect(connSpecStr string) (err error) {
 		}
 
 		// Create javascript map function that emits doc id and doc body
+		// NOTE: this is not efficient to emit the entire doc in the view query.
+		// The more efficient and recommended way is to just emit the id, and do a separate lookup for the doc body.
 		mapFunction := `function(doc, meta) {
                emit(meta.id, doc)
-        }
-		`
+        }`
 		// Create View
 		gocbView := gocb.View{
 			Map: mapFunction,
@@ -113,13 +117,13 @@ func (e *ExampleApp) Connect(connSpecStr string) (err error) {
 		gocbDesignDoc.Views[viewName] = gocbView
 
 		// Add design doc + view to source bucket
-		sourceBucketManager := e.SourceBucket.Manager("Administrator", e.SourceBucketSpec.Password)
+		sourceBucketManager := e.SourceBucket.Manager("Administrator", e.SourceBucketSpec.AdminPassword)
 		if err := sourceBucketManager.UpsertDesignDocument(gocbDesignDoc); err != nil {
 			return err
 		}
 
 		// Add design doc + view to target bucket
-		targetBucketManager := e.TargetBucket.Manager("Administrator", e.TargetBucketSpec.Password)
+		targetBucketManager := e.TargetBucket.Manager("Administrator", e.TargetBucketSpec.AdminPassword)
 		if err := targetBucketManager.UpsertDesignDocument(gocbDesignDoc); err != nil {
 			return err
 		}
@@ -167,6 +171,14 @@ func (e *ExampleApp) CopyBucketAddXATTRS() (err error) {
 
 }
 
+func (e *ExampleApp) CopyBucket() (err error) {
+	if err := e.CopyBucketWithCallback(nil); err != nil {
+		return err
+	}
+
+	return nil
+}
+
 func TableScanN1qlQuery(bucketName string) string {
 	// Get the doc ID and the doc body in a single query -- eg:
 	// "SELECT META(`travel-sample`).id,* FROM `travel-sample`"
@@ -178,7 +190,6 @@ func TableScanN1qlQuery(bucketName string) string {
 	)
 }
 
-
 func (e *ExampleApp) CopyBucketWithCallback(postInsertCallback DocProcessor) (err error) {
 
 	// A docprocesser callback that *wraps* the postInsertCallback to do the following:
@@ -189,10 +200,15 @@ func (e *ExampleApp) CopyBucketWithCallback(postInsertCallback DocProcessor) (er
 		// Insert the doc into the target bucket
 		_, err := e.TargetBucket.Insert(docId, doc, 0)
 		if err != nil {
-			return err
+			return fmt.Errorf("Error inserting doc id: %v.  Err: %v", docId, err)
 		}
 
-		return postInsertCallback(docId, doc)
+		if postInsertCallback != nil {
+			return postInsertCallback(docId, doc)
+		}
+
+		return nil
+
 	}
 
 	return e.ForEachDocIdSourceBucket(copyEachDoc)
@@ -298,53 +314,68 @@ func (e *ExampleApp) ForEachDocIdBucketN1ql(docProcessor DocProcessor, bucket *g
 	return nil
 }
 
-
 // Loop over each doc in the bucket and callback the doc id processor with the doc id
+// TODO: make sure this works if the view is in the process of being indexed
 func (e *ExampleApp) ForEachDocIdBucketViews(docProcessor DocProcessor, bucket *gocb.Bucket) (err error) {
 
-	log.Printf("Performing operation over bucket: %v", bucket.Name())
+	log.Printf("Performing operation over bucket via view query: %v", bucket.Name())
 
 	viewQuery := gocb.NewViewQuery(designDoc, viewName)
 
-	viewResults, err := bucket.ExecuteViewQuery(viewQuery)
-	if err != nil {
-		return err
-	}
+	pageSize := uint(10000)
+	skip := uint(0)
 
-	row := map[string]interface{}{}
 	for {
 
-		if gotRow := viewResults.Next(&row); gotRow == false {
-			break
+		viewQuery.Limit(pageSize)
+		viewQuery.Skip(skip)
+
+		log.Printf("Calling ExecuteViewQuery: %v", viewQuery)
+		viewResults, err := bucket.ExecuteViewQuery(viewQuery)
+		if err != nil {
+			return fmt.Errorf("Error executing viewQuery: %v.  Err: %v", viewQuery, err)
 		}
 
-		// Get row ID
-		rowIdRaw, ok := row["id"]
-		if !ok {
-			return fmt.Errorf("Row does not have id field")
-		}
-		rowIdStr, ok := rowIdRaw.(string)
-		if !ok {
-			return fmt.Errorf("Row id field not of expected type")
-		}
+		row := map[string]interface{}{}
+		for {
 
-		// Get row document
-		docRaw, ok := row["value"]
-		if !ok {
-			return fmt.Errorf("Row does not have doc field: %+v.  Row: %+v", bucket.Name(), row)
-		}
+			if gotRow := viewResults.Next(&row); gotRow == false {
+				log.Printf("No more rows in view result.  Call break")
+				break
+			}
 
-		// Invoke the doc processor callback
-		if err := docProcessor(rowIdStr, docRaw); err != nil {
-			return err
+			// Get row ID
+			rowIdRaw, ok := row["id"]
+			if !ok {
+				return fmt.Errorf("Row does not have id field")
+			}
+			rowIdStr, ok := rowIdRaw.(string)
+			if !ok {
+				return fmt.Errorf("Row id field not of expected type")
+			}
+
+			// Get row document
+			docRaw, ok := row["value"]
+			if !ok {
+				return fmt.Errorf("Row does not have doc field: %+v.  Row: %+v", bucket.Name(), row)
+			}
+
+			// Invoke the doc processor callback
+			log.Printf("Calling docProcessor with doc id %v", rowIdStr)
+			if err := docProcessor(rowIdStr, docRaw); err != nil {
+				return err
+			}
+
+			skip += 1
+
 		}
 
 	}
+
+	log.Printf("finished looping over viewResults")
 
 	return nil
 }
-
-
 
 func (e *ExampleApp) AddNameSpaceToTypeFieldViaSubdoc(namespacePrefix string) (err error) {
 
@@ -376,14 +407,16 @@ func (e *ExampleApp) AddNameSpaceToTypeFieldViaSubdoc(namespacePrefix string) (e
 
 func main() {
 
-	// Create an example application and connect to a couchbase cluster
+
 	sourceBucketSpec := BucketSpec{
-		Name:     "travel-sample",
-		Password: "password",
+		Name:          "travel-sample",
+		Password:      "password",
+		AdminPassword: "password",
 	}
 	targetBucketSpec := BucketSpec{
-		Name:     "travel-sample-copy",
-		Password: "password",
+		Name:          "travel-sample-copy",
+		Password:      "password",
+		AdminPassword: "password",
 	}
 	e := NewExample(sourceBucketSpec, targetBucketSpec)
 	e.Connect("couchbase://localhost")
@@ -391,7 +424,7 @@ func main() {
 	// ----------------------------- Copy Source Bucket -> Target Bucket -----------------------------------------------
 
 	// Copy the source bucket to the target bucket, adding XATTRS during the process
-	if err := e.CopyBucketAddXATTRS(); err != nil {
+	if err := e.CopyBucket(); err != nil { // TODO: change back to CopyBucketXattrs
 		panic(fmt.Errorf("Error: %v", err))
 	}
 
