@@ -20,41 +20,62 @@ const (
 // A custom function type that takes a doc id and returns an error
 type DocIdProcessor func(docId string) error
 
+type BucketSpec struct {
+	Name string
+	Password string
+}
+
 // A struct to keep references to the cluster connection and open buckets
 type ExampleApp struct {
 	ClusterConnection *gocb.Cluster
+	SourceBucketSpec BucketSpec
+	TargetBucketSpec BucketSpec
 	SourceBucket      *gocb.Bucket
 	TargetBucket      *gocb.Bucket
 }
 
 // Create a new ExampleApp
-func NewExample() *ExampleApp {
-	return &ExampleApp{}
+func NewExample(sourceBucketSpec, targetBucketSpec BucketSpec) *ExampleApp {
+	return &ExampleApp{
+		SourceBucketSpec: sourceBucketSpec,
+		TargetBucketSpec: targetBucketSpec,
+	}
 }
 
 // Connect to the cluster and buckets, create primary indexes
 func (e *ExampleApp) Connect(connSpecStr string) (err error) {
 
+	// Connect to cluster
 	e.ClusterConnection, err = gocb.Connect(connSpecStr)
 	if err != nil {
 		return err
 	}
 
-	e.SourceBucket, err = e.ClusterConnection.OpenBucket("travel-sample", "password")
+	// Connect to Source Bucket
+	e.SourceBucket, err = e.ClusterConnection.OpenBucket(
+		e.SourceBucketSpec.Name,
+		e.SourceBucketSpec.Password,
+	)
 	if err != nil {
 		return err
 	}
 
-	e.TargetBucket, err = e.ClusterConnection.OpenBucket("travel-sample-copy", "password")
+	// Connect to Target Bucket
+	e.TargetBucket, err = e.ClusterConnection.OpenBucket(
+		e.TargetBucketSpec.Name,
+		e.TargetBucketSpec.Password,
+	)
 	if err != nil {
 		return err
 	}
 
+	// Create primary index on source bucket
 	err = e.SourceBucket.Manager("", "").CreatePrimaryIndex("", true, false)
 	if err != nil {
 		return err
 	}
 
+	// Create primary index on target bucket
 	err = e.TargetBucket.Manager("", "").CreatePrimaryIndex("", true, false)
 	if err != nil {
 		return err
@@ -103,17 +124,27 @@ func (e *ExampleApp) CopyBucketAddXATTRS() (err error) {
 
 }
 
+func TableScanN1qlQuery(bucketName string) string {
+	// Get the doc ID and the doc body in a single query -- eg:
+	// "SELECT META(`travel-sample`).id,* FROM `travel-sample`"
+	//         ^^^^^^^^^^^^ doc id      ^ doc body
+	return fmt.Sprintf(
+		"SELECT META(`%s`).id,* FROM `%s`",
+		bucketName,
+		bucketName,
+	)
+}
+
 func (e *ExampleApp) CopyBucketWithCallback(postInsertCallback DocIdProcessor) (err error) {
 
 	log.Printf("Copying source bucket -> target bucket")
-
-	// Get the doc ID and the doc body in a single query
-	query := gocb.NewN1qlQuery("SELECT META(`travel-sample`).id,* FROM `travel-sample`")
+	query := gocb.NewN1qlQuery(TableScanN1qlQuery(e.SourceBucket.Name()))
 	rows, err := e.SourceBucket.ExecuteN1qlQuery(query, nil)
 	if err != nil {
 		return err
 	}
 
+	// Loop over results
 	row := map[string]interface{}{}
 	for rows.Next(&row) {
 
@@ -128,11 +159,12 @@ func (e *ExampleApp) CopyBucketWithCallback(postInsertCallback DocIdProcessor) (
 		}
 
 		// Get row document
-		docRaw, ok := row["travel-sample"]
+		docRaw, ok := row[e.SourceBucket.Name()]
 		if !ok {
 			return fmt.Errorf("Row does not have doc field")
 		}
 
+		// Insert the doc into the target bucket
 		_, err := e.TargetBucket.Insert(rowIdStr, docRaw, 0)
 		if err != nil {
 			return err
@@ -202,7 +234,7 @@ func (e *ExampleApp) ForEachDocIdBucket(docIdProcessor DocIdProcessor, bucket *g
 	log.Printf("Performing operation over bucket: %v", bucket.Name())
 
 	// Get the doc ID and the doc body in a single query
-	query := gocb.NewN1qlQuery("SELECT META(`travel-sample`).id,* FROM `travel-sample`")
+	query := gocb.NewN1qlQuery(TableScanN1qlQuery(bucket.Name()))
 	rows, err := e.SourceBucket.ExecuteN1qlQuery(query, nil)
 	if err != nil {
 		return err
@@ -262,7 +294,15 @@ func (e *ExampleApp) AddNameSpaceToTypeFieldViaSubdoc(namespacePrefix string) (e
 func main() {
 
 	// Create an example application and connect to a couchbase cluster
-	e := NewExample()
+	sourceBucketSpec := BucketSpec{
+		Name: "travel-sample",
+		Password: "password",
+	}
+	targetBucketSpec := BucketSpec{
+		Name: "travel-sample-copy",
+		Password: "password",
+	}
+	e := NewExample(sourceBucketSpec, targetBucketSpec)
 	e.Connect("couchbase://localhost")
 
 	// ----------------------------- Copy Source Bucket -> Target Bucket -----------------------------------------------
