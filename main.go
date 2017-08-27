@@ -46,7 +46,7 @@ type ExampleApp struct {
 // Create a new ExampleApp
 func NewExample(sourceBucketSpec, targetBucketSpec BucketSpec) *ExampleApp {
 	return &ExampleApp{
-		UseN1ql:          true,
+		UseN1ql:          false,
 		SourceBucketSpec: sourceBucketSpec,
 		TargetBucketSpec: targetBucketSpec,
 	}
@@ -176,6 +176,91 @@ func (e *ExampleApp) CopyBucket() (err error) {
 	}
 
 	return nil
+}
+
+func (e *ExampleApp) CopyBucketBatching() (err error) {
+
+	viewQuery := gocb.NewViewQuery(designDoc, viewName)
+
+	// TODO: if this page size is larger, it will return "panic: Error: queue overflowed" when doing bulk inserts.  Should handle that case.
+	pageSize := uint(1000)
+	skip := uint(0)
+
+	for {
+
+		viewQuery.Limit(pageSize)
+		viewQuery.Skip(skip)
+
+		log.Printf("Calling ExecuteViewQuery: %v", viewQuery)
+		viewResults, err := e.SourceBucket.ExecuteViewQuery(viewQuery)
+		if err != nil {
+			return fmt.Errorf("Error executing viewQuery: %v.  Err: %v", viewQuery, err)
+		}
+
+		var items []gocb.BulkOp
+
+		numResultsProcessed := 0
+		row := map[string]interface{}{}
+		for {
+
+			if gotRow := viewResults.Next(&row); gotRow == false {
+				log.Printf("No more rows in view result.")
+				if numResultsProcessed == 0 {
+					// No point in going to the next page, since this page had 0 results
+					return nil
+				}
+				// We've processed all results in this page, break out of inner for loop to process another page of results
+				break
+			}
+
+			// Get row ID
+			rowIdRaw, ok := row["id"]
+			if !ok {
+				return fmt.Errorf("Row does not have id field")
+			}
+			rowIdStr, ok := rowIdRaw.(string)
+			if !ok {
+				return fmt.Errorf("Row id field not of expected type")
+			}
+
+			// Get row document
+			docRaw, ok := row["value"]
+			if !ok {
+				return fmt.Errorf("Row does not have doc field: %+v.  Row: %+v", e.SourceBucket.Name(), row)
+			}
+
+			item := &gocb.InsertOp{
+				Key:   rowIdStr,
+				Value: docRaw,
+			}
+			items = append(items, item)
+
+			skip += 1
+			numResultsProcessed += 1
+
+		}
+
+		// Do the underlying bulk operation
+		log.Printf("Inserting %v items", len(items))
+		if err := e.TargetBucket.Do(items); err != nil {
+			return err
+		}
+		log.Printf("Inserted %v items", len(items))
+
+		// Make sure all bulk ops succeeded
+		for _, item := range items {
+			insertItem := item.(*gocb.InsertOp)
+			if insertItem.Err != nil {
+				return insertItem.Err
+			}
+		}
+
+		log.Printf("%v items inserted successfully", len(items))
+
+	}
+
+	return nil
+
 }
 
 func TableScanN1qlQuery(bucketName string) string {
@@ -429,7 +514,7 @@ func main() {
 	// ----------------------------- Copy Source Bucket -> Target Bucket -----------------------------------------------
 
 	// Copy the source bucket to the target bucket, adding XATTRS during the process
-	if err := e.CopyBucket(); err != nil { // TODO: change back to CopyBucketXattrs
+	if err := e.CopyBucketBatching(); err != nil { // TODO: change back to CopyBucketXattrs
 		panic(fmt.Errorf("Error: %v", err))
 	}
 
