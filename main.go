@@ -3,7 +3,6 @@ package main
 import (
 	"fmt"
 	"log"
-	"os"
 	"time"
 
 	"gopkg.in/couchbase/gocb.v1"
@@ -47,7 +46,7 @@ type ExampleApp struct {
 // Create a new ExampleApp
 func NewExample(sourceBucketSpec, targetBucketSpec BucketSpec) *ExampleApp {
 	return &ExampleApp{
-		UseN1ql:          false,
+		UseN1ql:          true,
 		SourceBucketSpec: sourceBucketSpec,
 		TargetBucketSpec: targetBucketSpec,
 	}
@@ -336,11 +335,17 @@ func (e *ExampleApp) ForEachDocIdBucketViews(docProcessor DocProcessor, bucket *
 			return fmt.Errorf("Error executing viewQuery: %v.  Err: %v", viewQuery, err)
 		}
 
+		numResultsProcessed := 0
 		row := map[string]interface{}{}
 		for {
 
 			if gotRow := viewResults.Next(&row); gotRow == false {
-				log.Printf("No more rows in view result.  Call break")
+				log.Printf("No more rows in view result.")
+				if numResultsProcessed == 0 {
+					// No point in going to the next page, since this page had 0 results
+					return nil
+				}
+				// We've processed all results in this page, break out of inner for loop to process another page of results
 				break
 			}
 
@@ -367,6 +372,7 @@ func (e *ExampleApp) ForEachDocIdBucketViews(docProcessor DocProcessor, bucket *
 			}
 
 			skip += 1
+			numResultsProcessed += 1
 
 		}
 
@@ -406,7 +412,6 @@ func (e *ExampleApp) AddNameSpaceToTypeFieldViaSubdoc(namespacePrefix string) (e
 }
 
 func main() {
-
 
 	sourceBucketSpec := BucketSpec{
 		Name:          "travel-sample",
