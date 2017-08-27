@@ -229,9 +229,9 @@ func (e *ExampleApp) ForEachDocIdBucket(docProcessor DocProcessor, bucket *gocb.
 		}
 
 		// Get row document
-		docRaw, ok := row[e.SourceBucket.Name()]
+		docRaw, ok := row[bucket.Name()]
 		if !ok {
-			return fmt.Errorf("Row does not have doc field")
+			return fmt.Errorf("Row does not have doc field: %+v.  Row: %+v", bucket.Name(), row)
 		}
 
 		// Invoke the doc processor callback
