@@ -90,30 +90,41 @@ func (e *ExampleApp) Connect(connSpecStr string) (err error) {
 		if err != nil {
 			return err
 		}
+
 	case false:  // use views
 
+		// Create design doc
 		gocbDesignDoc := &gocb.DesignDocument{
 			Name:  designDoc,
 			Views: map[string]gocb.View{},
 		}
 
+		// Create javascript map function that emits doc id and doc body
 		mapFunction := `function(doc, meta) {
                emit(meta.id, doc)
         }
 		`
+		// Create View
 		gocbView := gocb.View{
 			Map: mapFunction,
 		}
+
+		// Add view to design doc
 		gocbDesignDoc.Views[viewName] = gocbView
 
+		// Add design doc + view to source bucket
 		sourceBucketManager := e.SourceBucket.Manager("Administrator", e.SourceBucketSpec.Password)
-
 		if err := sourceBucketManager.UpsertDesignDocument(gocbDesignDoc); err != nil {
 			return err
 		}
 
-	}
+		// Add design doc + view to target bucket
+		targetBucketManager := e.TargetBucket.Manager("Administrator", e.TargetBucketSpec.Password)
+		if err := targetBucketManager.UpsertDesignDocument(gocbDesignDoc); err != nil {
+			return err
+		}
 
+	}
 
 	return nil
 }
@@ -338,18 +349,19 @@ func (e *ExampleApp) ForEachDocIdBucketViews(docProcessor DocProcessor, bucket *
 func (e *ExampleApp) AddNameSpaceToTypeFieldViaSubdoc(namespacePrefix string) (err error) {
 
 	// Iterate over all docs and update the type field to app:<existing_type>
+	// TODO: handle errors like "panic: Error: temporary failure occurred, try again later"
 	appendNamespaceToTypeField := func(docId string, doc interface{}) error {
 
 		currentValueOfTypeField, err := e.GetSubdocField(docId, "type")
 		if err != nil {
-			return err
+			return fmt.Errorf("Error getting subdoc field: %v.  Doc: %v", err, docId)
 		}
 
 		newValueOfTypeField := fmt.Sprintf("%v:%v", namespacePrefix, currentValueOfTypeField)
 
 		err = e.SetSubdocField(docId, "type", newValueOfTypeField)
 		if err != nil {
-			return err
+			return fmt.Errorf("Error setting subdoc field: %v.  Doc: %v", err, docId)
 		}
 
 		return nil
