@@ -21,8 +21,8 @@ const (
 	viewName = designDoc
 )
 
-// A custom function type that takes a doc id and doc and returns an error
-type DocProcessor func(docId string, doc interface{}) error
+// A custom function type that takes a slice of doc ids and a slice of doc bodies and returns an error
+type DocProcessor func(docId []string, doc []interface{}) error
 
 type BucketSpec struct {
 	Name          string
@@ -46,7 +46,7 @@ type ExampleApp struct {
 // Create a new ExampleApp
 func NewExample(sourceBucketSpec, targetBucketSpec BucketSpec) *ExampleApp {
 	return &ExampleApp{
-		UseN1ql:          false,
+		UseN1ql:          true,
 		SourceBucketSpec: sourceBucketSpec,
 		TargetBucketSpec: targetBucketSpec,
 	}
@@ -137,26 +137,31 @@ func (e *ExampleApp) CopyBucketAddXATTRS() (err error) {
 	// Create a post-insert callback function that will be invoked on
 	// every document that is copied from the source bucket and inserted into the target bucket.
 	// It adds the "DateCopied" XATTR to the doc.
-	postInsertCallback := func(docId string, doc interface{}) error {
+	postInsertCallback := func(docIds []string, docs []interface{}) error {
 
-		cas, err := e.TargetBucket.Get(docId, nil)
-		if err != nil {
-			return err
+		for _, docId := range docIds {
+
+			cas, err := e.TargetBucket.Get(docId, nil)
+			if err != nil {
+				return err
+			}
+
+			mutateFlag := gocb.SubdocDocFlagNone
+
+			xattrVal := map[string]interface{}{
+				"DateCopied":     time.Now(),
+				"UpstreamSource": e.SourceBucket.Name(),
+			}
+			builder := e.TargetBucket.MutateInEx(docId, mutateFlag, gocb.Cas(cas), uint32(0)).
+				UpsertEx(xattrKey, xattrVal, gocb.SubdocFlagXattr) // Update the xattr
+
+			_, err = builder.Execute()
+			if err != nil {
+				return err
+			}
+
 		}
 
-		mutateFlag := gocb.SubdocDocFlagNone
-
-		xattrVal := map[string]interface{}{
-			"DateCopied":     time.Now(),
-			"UpstreamSource": e.SourceBucket.Name(),
-		}
-		builder := e.TargetBucket.MutateInEx(docId, mutateFlag, gocb.Cas(cas), uint32(0)).
-			UpsertEx(xattrKey, xattrVal, gocb.SubdocFlagXattr) // Update the xattr
-
-		_, err = builder.Execute()
-		if err != nil {
-			return err
-		}
 
 		return nil
 	}
@@ -279,19 +284,30 @@ func (e *ExampleApp) CopyBucketWithCallback(postInsertCallback DocProcessor) (er
 	// A docprocesser callback that *wraps* the postInsertCallback to do the following:
 	// - Insert the doc into the target bucket
 	// - Invoke the postInsertCallback
-	copyEachDoc := func(docId string, doc interface{}) error {
+	copyEachDoc := func(docId []string, doc []interface{}) error {
 
-		// Insert the doc into the target bucket
-		_, err := e.TargetBucket.Insert(docId, doc, 0)
-		if err != nil {
-			return fmt.Errorf("Error inserting doc id: %v.  Err: %v", docId, err)
+		switch len(docId) {
+		case 1:
+
+			// Insert the doc into the target bucket
+			_, err := e.TargetBucket.Insert(docId[0], doc[0], 0)
+			if err != nil {
+				return fmt.Errorf("Error inserting doc id: %v.  Err: %v", docId, err)
+			}
+
+			if postInsertCallback != nil {
+				return postInsertCallback(docId, doc)
+			}
+
+			return nil
+
+		default:
+
+			// TODO: bulk ops
+
+			return nil
+
 		}
-
-		if postInsertCallback != nil {
-			return postInsertCallback(docId, doc)
-		}
-
-		return nil
 
 	}
 
@@ -389,7 +405,7 @@ func (e *ExampleApp) ForEachDocIdBucketN1ql(docProcessor DocProcessor, bucket *g
 		}
 
 		// Invoke the doc processor callback
-		if err := docProcessor(rowIdStr, docRaw); err != nil {
+		if err := docProcessor([]string{rowIdStr}, []interface{}{docRaw}); err != nil {
 			return err
 		}
 
@@ -451,8 +467,7 @@ func (e *ExampleApp) ForEachDocIdBucketViews(docProcessor DocProcessor, bucket *
 			}
 
 			// Invoke the doc processor callback
-			log.Printf("Calling docProcessor with doc id %v", rowIdStr)
-			if err := docProcessor(rowIdStr, docRaw); err != nil {
+			if err := docProcessor([]string{rowIdStr}, []interface{}{docRaw}); err != nil {
 				return err
 			}
 
@@ -472,18 +487,22 @@ func (e *ExampleApp) AddNameSpaceToTypeFieldViaSubdoc(namespacePrefix string) (e
 
 	// Iterate over all docs and update the type field to app:<existing_type>
 	// TODO: handle errors like "panic: Error: temporary failure occurred, try again later"
-	appendNamespaceToTypeField := func(docId string, doc interface{}) error {
+	appendNamespaceToTypeField := func(docIds []string, docs []interface{}) error {
 
-		currentValueOfTypeField, err := e.GetSubdocField(docId, "type")
-		if err != nil {
-			return fmt.Errorf("Error getting subdoc field: %v.  Doc: %v", err, docId)
-		}
+		for _, docId := range docIds {
 
-		newValueOfTypeField := fmt.Sprintf("%v:%v", namespacePrefix, currentValueOfTypeField)
+			currentValueOfTypeField, err := e.GetSubdocField(docId, "type")
+			if err != nil {
+				return fmt.Errorf("Error getting subdoc field: %v.  Doc: %v", err, docId)
+			}
 
-		err = e.SetSubdocField(docId, "type", newValueOfTypeField)
-		if err != nil {
-			return fmt.Errorf("Error setting subdoc field: %v.  Doc: %v", err, docId)
+			newValueOfTypeField := fmt.Sprintf("%v:%v", namespacePrefix, currentValueOfTypeField)
+
+			err = e.SetSubdocField(docId, "type", newValueOfTypeField)
+			if err != nil {
+				return fmt.Errorf("Error setting subdoc field: %v.  Doc: %v", err, docId)
+			}
+
 		}
 
 		return nil
@@ -514,7 +533,7 @@ func main() {
 	// ----------------------------- Copy Source Bucket -> Target Bucket -----------------------------------------------
 
 	// Copy the source bucket to the target bucket, adding XATTRS during the process
-	if err := e.CopyBucketBatching(); err != nil { // TODO: change back to CopyBucketXattrs
+	if err := e.CopyBucketAddXATTRS(); err != nil { // TODO: change back to CopyBucketXattrs
 		panic(fmt.Errorf("Error: %v", err))
 	}
 
