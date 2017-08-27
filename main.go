@@ -14,22 +14,21 @@ const (
 
 	// A sample doc ID for inspection purposes
 	sampleDocId = "airline_10123"
-
 )
 
-// A custom function type that takes a doc id and returns an error
-type DocIdProcessor func(docId string) error
+// A custom function type that takes a doc id and doc and returns an error
+type DocProcessor func(docId string, doc interface{}) error
 
 type BucketSpec struct {
-	Name string
+	Name     string
 	Password string
 }
 
 // A struct to keep references to the cluster connection and open buckets
 type ExampleApp struct {
 	ClusterConnection *gocb.Cluster
-	SourceBucketSpec BucketSpec
-	TargetBucketSpec BucketSpec
+	SourceBucketSpec  BucketSpec
+	TargetBucketSpec  BucketSpec
 	SourceBucket      *gocb.Bucket
 	TargetBucket      *gocb.Bucket
 }
@@ -84,14 +83,12 @@ func (e *ExampleApp) Connect(connSpecStr string) (err error) {
 	return nil
 }
 
-
-
 func (e *ExampleApp) CopyBucketAddXATTRS() (err error) {
 
 	// Create a post-insert callback function that will be invoked on
 	// every document that is copied from the source bucket and inserted into the target bucket.
 	// It adds the "DateCopied" XATTR to the doc.
-	postInsertCallback := func(docId string) error {
+	postInsertCallback := func(docId string, doc interface{}) error {
 
 		cas, err := e.TargetBucket.Get(docId, nil)
 		if err != nil {
@@ -101,7 +98,7 @@ func (e *ExampleApp) CopyBucketAddXATTRS() (err error) {
 		mutateFlag := gocb.SubdocDocFlagNone
 
 		xattrVal := map[string]interface{}{
-			"DateCopied": time.Now(),
+			"DateCopied":     time.Now(),
 			"UpstreamSource": e.SourceBucket.Name(),
 		}
 		builder := e.TargetBucket.MutateInEx(docId, mutateFlag, gocb.Cas(cas), uint32(0)).
@@ -135,49 +132,24 @@ func TableScanN1qlQuery(bucketName string) string {
 	)
 }
 
-func (e *ExampleApp) CopyBucketWithCallback(postInsertCallback DocIdProcessor) (err error) {
 
-	log.Printf("Copying source bucket -> target bucket")
-	query := gocb.NewN1qlQuery(TableScanN1qlQuery(e.SourceBucket.Name()))
-	rows, err := e.SourceBucket.ExecuteN1qlQuery(query, nil)
-	if err != nil {
-		return err
-	}
+func (e *ExampleApp) CopyBucketWithCallback(postInsertCallback DocProcessor) (err error) {
 
-	// Loop over results
-	row := map[string]interface{}{}
-	for rows.Next(&row) {
-
-		// Get row ID
-		rowIdRaw, ok := row["id"]
-		if !ok {
-			return fmt.Errorf("Row does not have id field")
-		}
-		rowIdStr, ok := rowIdRaw.(string)
-		if !ok {
-			return fmt.Errorf("Row id field not of expected type")
-		}
-
-		// Get row document
-		docRaw, ok := row[e.SourceBucket.Name()]
-		if !ok {
-			return fmt.Errorf("Row does not have doc field")
-		}
+	// A docprocesser callback that *wraps* the postInsertCallback to do the following:
+	// - Insert the doc into the target bucket
+	// - Invoke the postInsertCallback
+	copyEachDoc := func(docId string, doc interface{}) error {
 
 		// Insert the doc into the target bucket
-		_, err := e.TargetBucket.Insert(rowIdStr, docRaw, 0)
+		_, err := e.TargetBucket.Insert(docId, doc, 0)
 		if err != nil {
 			return err
 		}
 
-		// Invoke the post-insert callback
-		if err := postInsertCallback(rowIdStr); err != nil {
-			return err
-		}
-
+		return postInsertCallback(docId, doc)
 	}
 
-	return nil
+	return e.ForEachDocIdSourceBucket(copyEachDoc)
 
 }
 
@@ -197,7 +169,6 @@ func (e *ExampleApp) GetXattrs(docId, xattrKey string) (xattrVal interface{}, er
 }
 
 func (e *ExampleApp) GetSubdocField(docId, subdocKey string) (retValue interface{}, err error) {
-
 
 	frag, err := e.TargetBucket.LookupIn(docId).Get(subdocKey).Execute()
 	if err != nil {
@@ -224,12 +195,16 @@ func (e *ExampleApp) SetSubdocField(docId, subdocKey string, subdocVal interface
 }
 
 // Loop over each doc in the target bucket and callback the doc id processor with the doc id
-func (e *ExampleApp) ForEachDocIdTargetBucket(postInsertCallback DocIdProcessor) (err error) {
+func (e *ExampleApp) ForEachDocIdTargetBucket(postInsertCallback DocProcessor) (err error) {
 	return e.ForEachDocIdBucket(postInsertCallback, e.TargetBucket)
 }
 
+func (e *ExampleApp) ForEachDocIdSourceBucket(postInsertCallback DocProcessor) (err error) {
+	return e.ForEachDocIdBucket(postInsertCallback, e.SourceBucket)
+}
+
 // Loop over each doc in the bucket and callback the doc id processor with the doc id
-func (e *ExampleApp) ForEachDocIdBucket(docIdProcessor DocIdProcessor, bucket *gocb.Bucket) (err error) {
+func (e *ExampleApp) ForEachDocIdBucket(docProcessor DocProcessor, bucket *gocb.Bucket) (err error) {
 
 	log.Printf("Performing operation over bucket: %v", bucket.Name())
 
@@ -253,8 +228,14 @@ func (e *ExampleApp) ForEachDocIdBucket(docIdProcessor DocIdProcessor, bucket *g
 			return fmt.Errorf("Row id field not of expected type")
 		}
 
+		// Get row document
+		docRaw, ok := row[e.SourceBucket.Name()]
+		if !ok {
+			return fmt.Errorf("Row does not have doc field")
+		}
+
 		// Invoke the doc processor callback
-		if err := docIdProcessor(rowIdStr); err != nil {
+		if err := docProcessor(rowIdStr, docRaw); err != nil {
 			return err
 		}
 
@@ -263,11 +244,10 @@ func (e *ExampleApp) ForEachDocIdBucket(docIdProcessor DocIdProcessor, bucket *g
 	return nil
 }
 
-
 func (e *ExampleApp) AddNameSpaceToTypeFieldViaSubdoc(namespacePrefix string) (err error) {
 
 	// Iterate over all docs and update the type field to app:<existing_type>
-	appendNamespaceToTypeField := func(docId string) error {
+	appendNamespaceToTypeField := func(docId string, doc interface{}) error {
 
 		currentValueOfTypeField, err := e.GetSubdocField(docId, "type")
 		if err != nil {
@@ -295,11 +275,11 @@ func main() {
 
 	// Create an example application and connect to a couchbase cluster
 	sourceBucketSpec := BucketSpec{
-		Name: "travel-sample",
+		Name:     "travel-sample",
 		Password: "password",
 	}
 	targetBucketSpec := BucketSpec{
-		Name: "travel-sample-copy",
+		Name:     "travel-sample-copy",
 		Password: "password",
 	}
 	e := NewExample(sourceBucketSpec, targetBucketSpec)
@@ -340,6 +320,5 @@ func main() {
 		panic(fmt.Errorf("Error: %v", err))
 	}
 	log.Printf("%v type (after): %+v", sampleDocId, retValue)
-
 
 }
