@@ -14,6 +14,10 @@ const (
 
 	// A sample doc ID for inspection purposes
 	sampleDocId = "airline_10123"
+
+	designDoc = "all_docs"
+
+	viewName = designDoc
 )
 
 // A custom function type that takes a doc id and doc and returns an error
@@ -26,6 +30,10 @@ type BucketSpec struct {
 
 // A struct to keep references to the cluster connection and open buckets
 type ExampleApp struct {
+
+	// Use N1QL?  If false, use views
+	UseN1ql bool
+
 	ClusterConnection *gocb.Cluster
 	SourceBucketSpec  BucketSpec
 	TargetBucketSpec  BucketSpec
@@ -34,8 +42,9 @@ type ExampleApp struct {
 }
 
 // Create a new ExampleApp
-func NewExample(sourceBucketSpec, targetBucketSpec BucketSpec) *ExampleApp {
+func NewExample(sourceBucketSpec, targetBucketSpec BucketSpec, ) *ExampleApp {
 	return &ExampleApp{
+		UseN1ql: false,
 		SourceBucketSpec: sourceBucketSpec,
 		TargetBucketSpec: targetBucketSpec,
 	}
@@ -68,17 +77,43 @@ func (e *ExampleApp) Connect(connSpecStr string) (err error) {
 		return err
 	}
 
-	// Create primary index on source bucket
-	err = e.SourceBucket.Manager("", "").CreatePrimaryIndex("", true, false)
-	if err != nil {
-		return err
+	switch e.UseN1ql {
+	case true:
+		// Create primary index on source bucket
+		err = e.SourceBucket.Manager("", "").CreatePrimaryIndex("", true, false)
+		if err != nil {
+			return err
+		}
+
+		// Create primary index on target bucket
+		err = e.TargetBucket.Manager("", "").CreatePrimaryIndex("", true, false)
+		if err != nil {
+			return err
+		}
+	case false:  // use views
+
+		gocbDesignDoc := &gocb.DesignDocument{
+			Name:  designDoc,
+			Views: map[string]gocb.View{},
+		}
+
+		mapFunction := `function(doc, meta) {
+               emit(meta.id, doc)
+        }
+		`
+		gocbView := gocb.View{
+			Map: mapFunction,
+		}
+		gocbDesignDoc.Views[viewName] = gocbView
+
+		sourceBucketManager := e.SourceBucket.Manager("Administrator", e.SourceBucketSpec.Password)
+
+		if err := sourceBucketManager.UpsertDesignDocument(gocbDesignDoc); err != nil {
+			return err
+		}
+
 	}
 
-	// Create primary index on target bucket
-	err = e.TargetBucket.Manager("", "").CreatePrimaryIndex("", true, false)
-	if err != nil {
-		return err
-	}
 
 	return nil
 }
@@ -196,15 +231,23 @@ func (e *ExampleApp) SetSubdocField(docId, subdocKey string, subdocVal interface
 
 // Loop over each doc in the target bucket and callback the doc id processor with the doc id
 func (e *ExampleApp) ForEachDocIdTargetBucket(postInsertCallback DocProcessor) (err error) {
-	return e.ForEachDocIdBucket(postInsertCallback, e.TargetBucket)
+	if e.UseN1ql {
+		return e.ForEachDocIdBucketN1ql(postInsertCallback, e.TargetBucket)
+	} else {
+		return e.ForEachDocIdBucketViews(postInsertCallback, e.TargetBucket)
+	}
 }
 
 func (e *ExampleApp) ForEachDocIdSourceBucket(postInsertCallback DocProcessor) (err error) {
-	return e.ForEachDocIdBucket(postInsertCallback, e.SourceBucket)
+	if e.UseN1ql {
+		return e.ForEachDocIdBucketN1ql(postInsertCallback, e.SourceBucket)
+	} else {
+		return e.ForEachDocIdBucketViews(postInsertCallback, e.SourceBucket)
+	}
 }
 
 // Loop over each doc in the bucket and callback the doc id processor with the doc id
-func (e *ExampleApp) ForEachDocIdBucket(docProcessor DocProcessor, bucket *gocb.Bucket) (err error) {
+func (e *ExampleApp) ForEachDocIdBucketN1ql(docProcessor DocProcessor, bucket *gocb.Bucket) (err error) {
 
 	log.Printf("Performing operation over bucket: %v", bucket.Name())
 
@@ -243,6 +286,54 @@ func (e *ExampleApp) ForEachDocIdBucket(docProcessor DocProcessor, bucket *gocb.
 
 	return nil
 }
+
+
+// Loop over each doc in the bucket and callback the doc id processor with the doc id
+func (e *ExampleApp) ForEachDocIdBucketViews(docProcessor DocProcessor, bucket *gocb.Bucket) (err error) {
+
+	log.Printf("Performing operation over bucket: %v", bucket.Name())
+
+	viewQuery := gocb.NewViewQuery(designDoc, viewName)
+
+	viewResults, err := bucket.ExecuteViewQuery(viewQuery)
+	if err != nil {
+		return err
+	}
+
+	row := map[string]interface{}{}
+	for {
+
+		if gotRow := viewResults.Next(&row); gotRow == false {
+			break
+		}
+
+		// Get row ID
+		rowIdRaw, ok := row["id"]
+		if !ok {
+			return fmt.Errorf("Row does not have id field")
+		}
+		rowIdStr, ok := rowIdRaw.(string)
+		if !ok {
+			return fmt.Errorf("Row id field not of expected type")
+		}
+
+		// Get row document
+		docRaw, ok := row["value"]
+		if !ok {
+			return fmt.Errorf("Row does not have doc field: %+v.  Row: %+v", bucket.Name(), row)
+		}
+
+		// Invoke the doc processor callback
+		if err := docProcessor(rowIdStr, docRaw); err != nil {
+			return err
+		}
+
+	}
+
+	return nil
+}
+
+
 
 func (e *ExampleApp) AddNameSpaceToTypeFieldViaSubdoc(namespacePrefix string) (err error) {
 
