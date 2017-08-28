@@ -28,11 +28,11 @@ const (
 	viewName  = designDoc
 
 	// How many goroutines to use when processing view result pages
-	numGoRoutinesConcurrentViewResult = 12
+	numGoRoutinesConcurrentViewResult = 1
 
 	// View result page size
 	// TODO: if this page size too large, it will return "panic: Error: queue overflowed" when doing bulk inserts.  Should handle that case.
-	pageSizeViewResult = 15000
+	pageSizeViewResult = 1000
 )
 
 type DocProcessorInput struct {
@@ -647,7 +647,7 @@ func main() {
 
 	// Copy the source bucket to the target bucket, adding XATTRS during the process
 
-	if err := e.CopyBucketAnonymizeDoc(); err != nil {
+	if err := e.CopyBucketAddXATTRS(); err != nil {
 		panic(fmt.Errorf("Error: %v", err))
 	}
 

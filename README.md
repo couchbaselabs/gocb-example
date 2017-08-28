@@ -14,10 +14,10 @@ Some code to demonstrate the following GoCB usage:
 go get github.com/couchbaselabs/gocb-example
 ```
 
-- Install Couchbase 5.X or 4.X
+- Install Couchbase 5.X beta 2
 - Create travel sample data bucket via Couchbase UI
 - Create a new empty bucket called `travel-sample-copy`
-- If using Couchbase 5.X, you will need to create RBAC users
+- Create RBAC users
     - username: travel-sample password: "password"
     - username: travel-sample-copy password: "password"
 - In the `main()` function, you can toggle the `UseN1QL` flag to have it use N1QL vs Views to walk the source bucket
