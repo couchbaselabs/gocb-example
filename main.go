@@ -28,11 +28,11 @@ const (
 	viewName  = designDoc
 
 	// How many goroutines to use when processing view result pages
-	numGoRoutinesConcurrentViewResult = 1
+	numGoRoutinesConcurrentViewResult = 12
 
 	// View result page size
 	// TODO: if this page size too large, it will return "panic: Error: queue overflowed" when doing bulk inserts.  Should handle that case.
-	pageSizeViewResult = 1000
+	pageSizeViewResult = 15000
 )
 
 type DocProcessorInput struct {
@@ -285,6 +285,8 @@ func (e *ExampleApp) CopyBucketWithCallback(preInsertCallback DocProcessorReturn
 	// - Invoke the postInsertCallback
 	copyEachDoc := func(docIds []string, docs []interface{}) error {
 
+		log.Printf("Call preInsertCallback on %v docs", len(docIds))
+
 		if preInsertCallback != nil {
 			params := DocProcessorInput{
 				DocIds: docIds,
@@ -297,6 +299,8 @@ func (e *ExampleApp) CopyBucketWithCallback(preInsertCallback DocProcessorReturn
 			docs = returnVal.Docs
 			docIds = returnVal.DocIds
 		}
+
+		log.Printf("Inserting %v docs", len(docIds))
 
 		switch len(docIds) {
 		case 1:
@@ -321,11 +325,9 @@ func (e *ExampleApp) CopyBucketWithCallback(preInsertCallback DocProcessorReturn
 			}
 
 			// Do the underlying bulk operation
-			log.Printf("Inserting %v items", len(items))
 			if err := e.TargetBucket.Do(items); err != nil {
 				return err
 			}
-			log.Printf("Inserted %v items", len(items))
 
 			// Make sure all bulk ops succeeded
 			for _, item := range items {
@@ -337,9 +339,13 @@ func (e *ExampleApp) CopyBucketWithCallback(preInsertCallback DocProcessorReturn
 
 		}
 
+		log.Printf("Inserted %v docs, calling postInsertCallback", len(docIds))
+
 		if postInsertCallback != nil {
 			return postInsertCallback(docIds, docs)
 		}
+
+		log.Printf("Called postInsertCallback")
 
 		return nil
 
@@ -462,7 +468,10 @@ func (e *ExampleApp) ForEachDocIdBucketViewsConcurrent(docProcessor DocProcessor
 	// Create a pool of goroutines that will process docs
 	for i := 0; i < numGoRoutinesConcurrentViewResult; i++ {
 		go func(goroutineId int) {
+
 			for {
+				log.Printf("Goroutine %v waiting for item in viewResults", goroutineId)
+
 				viewResults := <-viewResultsChan
 				if docProcessor != nil {
 					log.Printf("Goroutine %v read viewResults and is invoking docProcessor", goroutineId)
@@ -528,6 +537,9 @@ func (e *ExampleApp) ForEachDocIdBucketViews(docProcessor DocProcessor, bucket *
 		log.Printf("Calling ExecuteViewQuery: %v", viewQuery)
 		viewResults, err := bucket.ExecuteViewQuery(viewQuery)
 		if err != nil {
+			// TODO: Sometimes getting this error, should handle better
+			// TODO: .. Error: Error executing viewQuery: &{all_docs all_docs map[limit:[15000] skip:[1365000]] {[]}}.
+			// TODO: .. Err: Get http://host:8092/bucket/_design/all_docs/_view/all_docs?limit=15000&skip=1365000: net/http: request canceled
 			return fmt.Errorf("Error executing viewQuery: %v.  Err: %v", viewQuery, err)
 		}
 
