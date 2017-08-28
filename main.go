@@ -8,6 +8,8 @@ import (
 	"sync"
 
 	"gopkg.in/couchbase/gocb.v1"
+	"regexp"
+	"github.com/tleyden/json-anonymizer"
 )
 
 const (
@@ -23,11 +25,11 @@ const (
 	viewName  = designDoc
 
 	// How many goroutines to use when processing view result pages
-	numGoRoutinesConcurrentViewResult = 2
+	numGoRoutinesConcurrentViewResult = 1
 
 	// View result page size
 	// TODO: if this page size too large, it will return "panic: Error: queue overflowed" when doing bulk inserts.  Should handle that case.
-	pageSizeViewResult = 2500
+	pageSizeViewResult = 1000
 )
 
 // A custom function type that takes a slice of doc ids and a slice of doc bodies and returns an error
@@ -55,7 +57,7 @@ type ExampleApp struct {
 // Create a new ExampleApp
 func NewExample(sourceBucketSpec, targetBucketSpec BucketSpec) *ExampleApp {
 	return &ExampleApp{
-		UseN1ql:          false,
+		UseN1ql:          true,
 		SourceBucketSpec: sourceBucketSpec,
 		TargetBucketSpec: targetBucketSpec,
 	}
@@ -139,6 +141,82 @@ func (e *ExampleApp) Connect(connSpecStr string) (err error) {
 	}
 
 	return nil
+}
+
+func (e *ExampleApp) CopyBucketAnonymizeDoc() (err error) {
+
+	// Anything that starts with an underscore
+	regexpStartsUnderscore, err := regexp.Compile("_(.)*")
+	if err != nil {
+		return err
+	}
+
+	config := json_anonymizer.JsonAnonymizerConfig{
+		SkipFieldsMatchingRegex: []*regexp.Regexp{
+			regexpStartsUnderscore,
+		},
+		AnonymizeKeys: false,
+	}
+	jsonAnonymizer := json_anonymizer.NewJsonAnonymizer(config)
+
+	postInsertCallback := func(docIds []string, docs []interface{}) error {
+
+		for _, docId := range docIds {
+
+			// Get existing doc in order to get CAS
+			value := map[string]interface{}{}
+			_, err := e.TargetBucket.Get(docId, &value)
+			if err != nil {
+				return err
+			}
+
+			anonymizedVal, err := jsonAnonymizer.Anonymize(value)
+			if err != nil {
+				return err
+			}
+
+			newDocId := docId
+
+			if config.AnonymizeKeys {
+				anonymizedDocId, err := jsonAnonymizer.Anonymize(docId)
+				if err != nil {
+					return err
+				}
+				newDocId = anonymizedDocId.(string)
+
+				// Now delete the original doc since we have an anonymized doc (even the key)
+				_, err = e.TargetBucket.Remove(docId, 0)
+				if err != nil {
+					return err
+				}
+
+			}
+
+			_, err = e.TargetBucket.Upsert(
+				newDocId,
+				anonymizedVal,
+				0,
+			)
+
+			if err != nil {
+				return err
+			}
+
+
+
+
+		}
+
+		return nil
+	}
+
+	// Copy the bucket and pass the post-insert callback function
+	if err := e.CopyBucketWithCallback(postInsertCallback); err != nil {
+		return err
+	}
+
+	return nil
+
 }
 
 // Copies source bucket to target bucket, inserting XATTRS in target docs
@@ -561,7 +639,8 @@ func main() {
 	// ----------------------------- Copy Source Bucket -> Target Bucket -----------------------------------------------
 
 	// Copy the source bucket to the target bucket, adding XATTRS during the process
-	if err := e.CopyBucket(); err != nil {
+
+	if err := e.CopyBucketAnonymizeDoc(); err != nil {
 		panic(fmt.Errorf("Error: %v", err))
 	}
 
