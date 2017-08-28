@@ -1,8 +1,14 @@
 
+Some code to demonstrate the following GoCB usage:
+
+- Copies the data from a source bucket to a target bucket
+- Anonymizes the document contents via [json-anonymizer](https://github.com/tleyden/json-anonymizer)
+
+
 ## Setup
 
 ```
-go get github.com/tleyden/gocb-example
+go get github.com/couchbaselabs/gocb-example
 ```
 
 
