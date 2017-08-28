@@ -3,7 +3,6 @@ package main
 import (
 	"fmt"
 	"log"
-	"os"
 	"time"
 
 	"sync"
@@ -29,15 +28,22 @@ const (
 	viewName  = designDoc
 
 	// How many goroutines to use when processing view result pages
-	numGoRoutinesConcurrentViewResult = 12
+	numGoRoutinesConcurrentViewResult = 1
 
 	// View result page size
 	// TODO: if this page size too large, it will return "panic: Error: queue overflowed" when doing bulk inserts.  Should handle that case.
-	pageSizeViewResult = 15000
+	pageSizeViewResult = 1000
 )
 
+type DocProcessorInput struct {
+	DocIds []string
+	Docs   []interface{}
+}
+
 // A custom function type that takes a slice of doc ids and a slice of doc bodies and returns an error
-type DocProcessor func(docIds []string, docs []interface{}) error
+type DocProcessor func(docIds []string, docs []interface{}) (err error)
+
+type DocProcessorReturnDocs func(input DocProcessorInput) (output DocProcessorInput, err error)
 
 type BucketSpec struct {
 	Name          string
@@ -163,23 +169,18 @@ func (e *ExampleApp) CopyBucketAnonymizeDoc() (err error) {
 	}
 	jsonAnonymizer := json_anonymizer.NewJsonAnonymizer(config)
 
+	preInsertCallback := func(input DocProcessorInput) (output DocProcessorInput, err error) {
 
-	// TODO: this is not very efficient.  Instead, there should be a way to add a hook at the point the
-	// TODO: ... doc is being copied.
-	postInsertCallback := func(docIds []string, docs []interface{}) error {
+		output = DocProcessorInput{
+			DocIds: make([]string, len(input.DocIds)),
+			Docs:   make([]interface{}, len(input.Docs)),
+		}
+		for i, docId := range input.DocIds {
+			doc := input.Docs[i]
 
-		for _, docId := range docIds {
-
-			// Get existing doc in order to get CAS
-			var value interface{}
-			_, err := e.TargetBucket.Get(docId, &value)
+			anonymizedVal, err := jsonAnonymizer.Anonymize(doc)
 			if err != nil {
-				return fmt.Errorf("Error getting doc to anonymize.  Doc Id: %v.  Err: %v", docId, err)
-			}
-
-			anonymizedVal, err := jsonAnonymizer.Anonymize(value)
-			if err != nil {
-				return fmt.Errorf("Error anonymizing doc with id: %v.  Err: %v", docId, err)
+				return output, fmt.Errorf("Error anonymizing doc with id: %v.  Err: %v", docId, err)
 			}
 
 			newDocId := docId
@@ -187,34 +188,23 @@ func (e *ExampleApp) CopyBucketAnonymizeDoc() (err error) {
 			if config.AnonymizeKeys {
 				anonymizedDocId, err := jsonAnonymizer.Anonymize(docId)
 				if err != nil {
-					return fmt.Errorf("Error anonymizing doc id itself: %v.  Err: %v", docId, err)
+					return output, fmt.Errorf("Error anonymizing doc id itself: %v.  Err: %v", docId, err)
 				}
 				newDocId = anonymizedDocId.(string)
 
-				// Now delete the original doc since we have an anonymized doc (even the key)
-				_, err = e.TargetBucket.Remove(docId, 0)
-				if err != nil {
-					return err
-				}
-
 			}
 
-			_, err = e.TargetBucket.Upsert(
-				newDocId,
-				anonymizedVal,
-				0,
-			)
-			if err != nil {
-				return fmt.Errorf("Error calling upsert on anonymized doc with id: %v.  Err: %v", docId, err)
-			}
+			output.DocIds[i] = newDocId
+			output.Docs[i] = anonymizedVal
 
 		}
 
-		return nil
+		return output, nil
+
 	}
 
 	// Copy the bucket and pass the post-insert callback function
-	if err := e.CopyBucketWithCallback(postInsertCallback); err != nil {
+	if err := e.CopyBucketWithCallback(preInsertCallback, nil); err != nil {
 		return err
 	}
 
@@ -261,7 +251,7 @@ func (e *ExampleApp) CopyBucketAddXATTRS() (err error) {
 	}
 
 	// Copy the bucket and pass the post-insert callback function
-	if err := e.CopyBucketWithCallback(postInsertCallback); err != nil {
+	if err := e.CopyBucketWithCallback(nil, postInsertCallback); err != nil {
 		return err
 	}
 
@@ -270,7 +260,7 @@ func (e *ExampleApp) CopyBucketAddXATTRS() (err error) {
 }
 
 func (e *ExampleApp) CopyBucket() (err error) {
-	if err := e.CopyBucketWithCallback(nil); err != nil {
+	if err := e.CopyBucketWithCallback(nil, nil); err != nil {
 		return err
 	}
 
@@ -288,12 +278,25 @@ func TableScanN1qlQuery(bucketName string) string {
 	)
 }
 
-func (e *ExampleApp) CopyBucketWithCallback(postInsertCallback DocProcessor) (err error) {
+func (e *ExampleApp) CopyBucketWithCallback(preInsertCallback DocProcessorReturnDocs, postInsertCallback DocProcessor) (err error) {
 
 	// A docprocesser callback that *wraps* the postInsertCallback to do the following:
 	// - Insert the doc into the target bucket
 	// - Invoke the postInsertCallback
 	copyEachDoc := func(docIds []string, docs []interface{}) error {
+
+		if preInsertCallback != nil {
+			params := DocProcessorInput{
+				DocIds: docIds,
+				Docs:   docs,
+			}
+			returnVal, err := preInsertCallback(params)
+			if err != nil {
+				return err
+			}
+			docs = returnVal.Docs
+			docIds = returnVal.DocIds
+		}
 
 		switch len(docIds) {
 		case 1:
@@ -303,12 +306,6 @@ func (e *ExampleApp) CopyBucketWithCallback(postInsertCallback DocProcessor) (er
 			if err != nil {
 				return fmt.Errorf("Error inserting doc id: %v.  Err: %v", docIds[0], err)
 			}
-
-			if postInsertCallback != nil {
-				return postInsertCallback(docIds, docs)
-			}
-
-			return nil
 
 		default:
 
@@ -338,13 +335,13 @@ func (e *ExampleApp) CopyBucketWithCallback(postInsertCallback DocProcessor) (er
 				}
 			}
 
-			if postInsertCallback != nil {
-				return postInsertCallback(docIds, docs)
-			}
-
-			return nil
-
 		}
+
+		if postInsertCallback != nil {
+			return postInsertCallback(docIds, docs)
+		}
+
+		return nil
 
 	}
 
@@ -452,11 +449,6 @@ func (e *ExampleApp) ForEachDocIdBucketN1ql(docProcessor DocProcessor, bucket *g
 	}
 
 	return nil
-}
-
-type DocProcessorInput struct {
-	DocIds []string
-	Docs   []interface{}
 }
 
 func (e *ExampleApp) ForEachDocIdBucketViewsConcurrent(docProcessor DocProcessor, bucket *gocb.Bucket) (err error) {
