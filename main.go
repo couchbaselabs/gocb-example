@@ -20,15 +20,14 @@ const (
 
 	// View and design doc name
 	designDoc = "all_docs"
-	viewName = designDoc
+	viewName  = designDoc
 
 	// How many goroutines to use when processing view result pages
-	numGoRoutinesConcurrentViewResult = 12
+	numGoRoutinesConcurrentViewResult = 4
 
 	// View result page size
 	// TODO: if this page size too large, it will return "panic: Error: queue overflowed" when doing bulk inserts.  Should handle that case.
-	pageSizeViewResult = 1000
-
+	pageSizeViewResult = 2500
 )
 
 // A custom function type that takes a slice of doc ids and a slice of doc bodies and returns an error
@@ -381,20 +380,25 @@ func (e *ExampleApp) ForEachDocIdBucketViewsConcurrent(docProcessor DocProcessor
 	pendingWorkWaitGroup := sync.WaitGroup{}
 
 	// Create a channel to pass docs to the goroutines
-	viewResultsChan := make(chan DocProcessorInput, numGoRoutinesConcurrentViewResult)
+	viewResultsChanBufferSize := 5 * numGoRoutinesConcurrentViewResult
+	viewResultsChan := make(chan DocProcessorInput, viewResultsChanBufferSize)
 
 	// Create a pool of goroutines that will process docs
 	for i := 0; i < numGoRoutinesConcurrentViewResult; i++ {
-		go func() {
+		go func(goroutineId int) {
 			for {
 				viewResults := <-viewResultsChan
-				if err := docProcessor(viewResults.DocIds, viewResults.Docs); err != nil {
-					// TODO: should propagate the error back rather than panicking here
-					panic(fmt.Sprintf("Goroutine error calling docProcessor: %v", err))
+				if docProcessor != nil {
+					log.Printf("Goroutine %v read viewResults and is invoking docProcessor", goroutineId)
+					if err := docProcessor(viewResults.DocIds, viewResults.Docs); err != nil {
+						// TODO: should propagate the error back rather than panicking here
+						panic(fmt.Sprintf("Goroutine error calling docProcessor: %v", err))
+					}
 				}
+
 				pendingWorkWaitGroup.Done()
 			}
-		}()
+		}(i)
 	}
 
 	viewResultsProcessor := func(docIds []string, docs []interface{}) error {
@@ -404,11 +408,14 @@ func (e *ExampleApp) ForEachDocIdBucketViewsConcurrent(docProcessor DocProcessor
 			Docs:   docs,
 		}
 
+		// Add to the wait group
+		pendingWorkWaitGroup.Add(1)
+
 		// Loop over view results
 		// Send result down the channel  (blocks if all goroutines are busy).  Increment workPending wait group
+		log.Printf("Adding view results to chan")
 		viewResultsChan <- docProcessorInput
-
-		pendingWorkWaitGroup.Add(1)
+		log.Printf("Added view results to chan")
 
 		return nil
 
@@ -549,7 +556,7 @@ func main() {
 	// ----------------------------- Copy Source Bucket -> Target Bucket -----------------------------------------------
 
 	// Copy the source bucket to the target bucket, adding XATTRS during the process
-	if err := e.CopyBucketAddXATTRS(); err != nil {
+	if err := e.CopyBucket(); err != nil {
 		panic(fmt.Errorf("Error: %v", err))
 	}
 
