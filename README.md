@@ -2,8 +2,11 @@
 Some code to demonstrate the following GoCB usage:
 
 - Copies the data from a source bucket to a target bucket
+    - Iterate docs via N1QL query
+    - Iterate docs via View query
 - Anonymizes the document contents via [json-anonymizer](https://github.com/tleyden/json-anonymizer)
-
+- Add an XATTR (Extended Attribute) to each doc
+- Manipulate fields via Subdoc API
 
 ## Setup
 
