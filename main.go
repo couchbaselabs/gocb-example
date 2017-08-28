@@ -23,7 +23,7 @@ const (
 	viewName  = designDoc
 
 	// How many goroutines to use when processing view result pages
-	numGoRoutinesConcurrentViewResult = 4
+	numGoRoutinesConcurrentViewResult = 2
 
 	// View result page size
 	// TODO: if this page size too large, it will return "panic: Error: queue overflowed" when doing bulk inserts.  Should handle that case.
@@ -333,6 +333,7 @@ func (e *ExampleApp) ForEachDocIdSourceBucket(postInsertCallback DocProcessor) (
 func (e *ExampleApp) ForEachDocIdBucketN1ql(docProcessor DocProcessor, bucket *gocb.Bucket) (err error) {
 
 	log.Printf("Performing operation over bucket: %v", bucket.Name())
+	defer 	log.Printf("Finished operation over bucket: %v", bucket.Name())
 
 	// Get the doc ID and the doc body in a single query
 	query := gocb.NewN1qlQuery(TableScanN1qlQuery(bucket.Name()))
@@ -360,9 +361,11 @@ func (e *ExampleApp) ForEachDocIdBucketN1ql(docProcessor DocProcessor, bucket *g
 			return fmt.Errorf("Row does not have doc field: %+v.  Row: %+v", bucket.Name(), row)
 		}
 
-		// Invoke the doc processor callback
-		if err := docProcessor([]string{rowIdStr}, []interface{}{docRaw}); err != nil {
-			return err
+		if docProcessor != nil {
+			// Invoke the doc processor callback
+			if err := docProcessor([]string{rowIdStr}, []interface{}{docRaw}); err != nil {
+				return err
+			}
 		}
 
 	}
@@ -413,9 +416,10 @@ func (e *ExampleApp) ForEachDocIdBucketViewsConcurrent(docProcessor DocProcessor
 
 		// Loop over view results
 		// Send result down the channel  (blocks if all goroutines are busy).  Increment workPending wait group
+		now := time.Now()
 		log.Printf("Adding view results to chan")
 		viewResultsChan <- docProcessorInput
-		log.Printf("Added view results to chan")
+		log.Printf("Added view results to chan, took: %v ns", time.Since(now))
 
 		return nil
 
@@ -436,7 +440,8 @@ func (e *ExampleApp) ForEachDocIdBucketViewsConcurrent(docProcessor DocProcessor
 // TODO: make sure this works if the view is in the process of being indexed
 func (e *ExampleApp) ForEachDocIdBucketViews(docProcessor DocProcessor, bucket *gocb.Bucket) (err error) {
 
-	log.Printf("Performing operation over bucket via view query: %v", bucket.Name())
+	log.Printf("Performing operation via views over bucket: %v", bucket.Name())
+	defer 	log.Printf("Finished operation via views over bucket: %v", bucket.Name())
 
 	viewQuery := gocb.NewViewQuery(designDoc, viewName)
 
