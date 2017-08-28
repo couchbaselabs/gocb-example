@@ -3,14 +3,18 @@ package main
 import (
 	"fmt"
 	"log"
+	"os"
 	"time"
 
 	"sync"
 
-	"gopkg.in/couchbase/gocb.v1"
 	"regexp"
+
 	"github.com/tleyden/json-anonymizer"
+	"gopkg.in/couchbase/gocb.v1"
 )
+
+// Example of using GoCB -- See README.md for more info
 
 const (
 
@@ -25,11 +29,11 @@ const (
 	viewName  = designDoc
 
 	// How many goroutines to use when processing view result pages
-	numGoRoutinesConcurrentViewResult = 1
+	numGoRoutinesConcurrentViewResult = 12
 
 	// View result page size
 	// TODO: if this page size too large, it will return "panic: Error: queue overflowed" when doing bulk inserts.  Should handle that case.
-	pageSizeViewResult = 1000
+	pageSizeViewResult = 15000
 )
 
 // A custom function type that takes a slice of doc ids and a slice of doc bodies and returns an error
@@ -57,7 +61,7 @@ type ExampleApp struct {
 // Create a new ExampleApp
 func NewExample(sourceBucketSpec, targetBucketSpec BucketSpec) *ExampleApp {
 	return &ExampleApp{
-		UseN1ql:          true,
+		UseN1ql:          false,
 		SourceBucketSpec: sourceBucketSpec,
 		TargetBucketSpec: targetBucketSpec,
 	}
@@ -155,24 +159,27 @@ func (e *ExampleApp) CopyBucketAnonymizeDoc() (err error) {
 		SkipFieldsMatchingRegex: []*regexp.Regexp{
 			regexpStartsUnderscore,
 		},
-		AnonymizeKeys: false,
+		AnonymizeKeys: true,
 	}
 	jsonAnonymizer := json_anonymizer.NewJsonAnonymizer(config)
 
+
+	// TODO: this is not very efficient.  Instead, there should be a way to add a hook at the point the
+	// TODO: ... doc is being copied.
 	postInsertCallback := func(docIds []string, docs []interface{}) error {
 
 		for _, docId := range docIds {
 
 			// Get existing doc in order to get CAS
-			value := map[string]interface{}{}
+			var value interface{}
 			_, err := e.TargetBucket.Get(docId, &value)
 			if err != nil {
-				return err
+				return fmt.Errorf("Error getting doc to anonymize.  Doc Id: %v.  Err: %v", docId, err)
 			}
 
 			anonymizedVal, err := jsonAnonymizer.Anonymize(value)
 			if err != nil {
-				return err
+				return fmt.Errorf("Error anonymizing doc with id: %v.  Err: %v", docId, err)
 			}
 
 			newDocId := docId
@@ -180,7 +187,7 @@ func (e *ExampleApp) CopyBucketAnonymizeDoc() (err error) {
 			if config.AnonymizeKeys {
 				anonymizedDocId, err := jsonAnonymizer.Anonymize(docId)
 				if err != nil {
-					return err
+					return fmt.Errorf("Error anonymizing doc id itself: %v.  Err: %v", docId, err)
 				}
 				newDocId = anonymizedDocId.(string)
 
@@ -197,13 +204,9 @@ func (e *ExampleApp) CopyBucketAnonymizeDoc() (err error) {
 				anonymizedVal,
 				0,
 			)
-
 			if err != nil {
-				return err
+				return fmt.Errorf("Error calling upsert on anonymized doc with id: %v.  Err: %v", docId, err)
 			}
-
-
-
 
 		}
 
@@ -411,7 +414,7 @@ func (e *ExampleApp) ForEachDocIdSourceBucket(postInsertCallback DocProcessor) (
 func (e *ExampleApp) ForEachDocIdBucketN1ql(docProcessor DocProcessor, bucket *gocb.Bucket) (err error) {
 
 	log.Printf("Performing operation over bucket: %v", bucket.Name())
-	defer 	log.Printf("Finished operation over bucket: %v", bucket.Name())
+	defer log.Printf("Finished operation over bucket: %v", bucket.Name())
 
 	// Get the doc ID and the doc body in a single query
 	query := gocb.NewN1qlQuery(TableScanN1qlQuery(bucket.Name()))
@@ -497,7 +500,7 @@ func (e *ExampleApp) ForEachDocIdBucketViewsConcurrent(docProcessor DocProcessor
 		now := time.Now()
 		log.Printf("Adding view results to chan")
 		viewResultsChan <- docProcessorInput
-		log.Printf("Added view results to chan, took: %v ns", time.Since(now))
+		log.Printf("Added view results to chan, took: %v", time.Since(now))
 
 		return nil
 
@@ -519,7 +522,7 @@ func (e *ExampleApp) ForEachDocIdBucketViewsConcurrent(docProcessor DocProcessor
 func (e *ExampleApp) ForEachDocIdBucketViews(docProcessor DocProcessor, bucket *gocb.Bucket) (err error) {
 
 	log.Printf("Performing operation via views over bucket: %v", bucket.Name())
-	defer 	log.Printf("Finished operation via views over bucket: %v", bucket.Name())
+	defer log.Printf("Finished operation via views over bucket: %v", bucket.Name())
 
 	viewQuery := gocb.NewViewQuery(designDoc, viewName)
 
