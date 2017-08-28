@@ -5,6 +5,8 @@ import (
 	"log"
 	"time"
 
+	"sync"
+
 	"gopkg.in/couchbase/gocb.v1"
 )
 
@@ -16,13 +18,21 @@ const (
 	// A sample doc ID for inspection purposes
 	sampleDocId = "airline_10123"
 
+	// View and design doc name
 	designDoc = "all_docs"
-
 	viewName = designDoc
+
+	// How many goroutines to use when processing view result pages
+	numGoRoutinesConcurrentViewResult = 12
+
+	// View result page size
+	// TODO: if this page size too large, it will return "panic: Error: queue overflowed" when doing bulk inserts.  Should handle that case.
+	pageSizeViewResult = 1000
+
 )
 
 // A custom function type that takes a slice of doc ids and a slice of doc bodies and returns an error
-type DocProcessor func(docId []string, doc []interface{}) error
+type DocProcessor func(docIds []string, docs []interface{}) error
 
 type BucketSpec struct {
 	Name          string
@@ -167,7 +177,6 @@ func (e *ExampleApp) CopyBucketAddXATTRS() (err error) {
 
 		}
 
-
 		return nil
 	}
 
@@ -309,7 +318,7 @@ func (e *ExampleApp) ForEachDocIdTargetBucket(postInsertCallback DocProcessor) (
 	if e.UseN1ql {
 		return e.ForEachDocIdBucketN1ql(postInsertCallback, e.TargetBucket)
 	} else {
-		return e.ForEachDocIdBucketViews(postInsertCallback, e.TargetBucket)
+		return e.ForEachDocIdBucketViewsConcurrent(postInsertCallback, e.TargetBucket)
 	}
 }
 
@@ -317,7 +326,7 @@ func (e *ExampleApp) ForEachDocIdSourceBucket(postInsertCallback DocProcessor) (
 	if e.UseN1ql {
 		return e.ForEachDocIdBucketN1ql(postInsertCallback, e.SourceBucket)
 	} else {
-		return e.ForEachDocIdBucketViews(postInsertCallback, e.SourceBucket)
+		return e.ForEachDocIdBucketViewsConcurrent(postInsertCallback, e.SourceBucket)
 	}
 }
 
@@ -362,6 +371,60 @@ func (e *ExampleApp) ForEachDocIdBucketN1ql(docProcessor DocProcessor, bucket *g
 	return nil
 }
 
+type DocProcessorInput struct {
+	DocIds []string
+	Docs   []interface{}
+}
+
+func (e *ExampleApp) ForEachDocIdBucketViewsConcurrent(docProcessor DocProcessor, bucket *gocb.Bucket) (err error) {
+
+	pendingWorkWaitGroup := sync.WaitGroup{}
+
+	// Create a channel to pass docs to the goroutines
+	viewResultsChan := make(chan DocProcessorInput, numGoRoutinesConcurrentViewResult)
+
+	// Create a pool of goroutines that will process docs
+	for i := 0; i < numGoRoutinesConcurrentViewResult; i++ {
+		go func() {
+			for {
+				viewResults := <-viewResultsChan
+				if err := docProcessor(viewResults.DocIds, viewResults.Docs); err != nil {
+					// TODO: should propagate the error back rather than panicking here
+					panic(fmt.Sprintf("Goroutine error calling docProcessor: %v", err))
+				}
+				pendingWorkWaitGroup.Done()
+			}
+		}()
+	}
+
+	viewResultsProcessor := func(docIds []string, docs []interface{}) error {
+
+		docProcessorInput := DocProcessorInput{
+			DocIds: docIds,
+			Docs:   docs,
+		}
+
+		// Loop over view results
+		// Send result down the channel  (blocks if all goroutines are busy).  Increment workPending wait group
+		viewResultsChan <- docProcessorInput
+
+		pendingWorkWaitGroup.Add(1)
+
+		return nil
+
+	}
+
+	if err := e.ForEachDocIdBucketViews(viewResultsProcessor, bucket); err != nil {
+		return err
+	}
+
+	// Wait until all work is done
+	pendingWorkWaitGroup.Wait()
+
+	return nil
+
+}
+
 // Loop over each doc in the bucket and callback the doc id processor with the doc id
 // TODO: make sure this works if the view is in the process of being indexed
 func (e *ExampleApp) ForEachDocIdBucketViews(docProcessor DocProcessor, bucket *gocb.Bucket) (err error) {
@@ -370,13 +433,11 @@ func (e *ExampleApp) ForEachDocIdBucketViews(docProcessor DocProcessor, bucket *
 
 	viewQuery := gocb.NewViewQuery(designDoc, viewName)
 
-	//	// TODO: if this page size is larger, it will return "panic: Error: queue overflowed" when doing bulk inserts.  Should handle that case.
-	pageSize := uint(1000)
 	skip := uint(0)
 
 	for {
 
-		viewQuery.Limit(pageSize)
+		viewQuery.Limit(pageSizeViewResult)
 		viewQuery.Skip(skip)
 
 		log.Printf("Calling ExecuteViewQuery: %v", viewQuery)
