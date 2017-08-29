@@ -27,3 +27,4 @@ go get github.com/couchbaselabs/gocb-example
 * https://developer.couchbase.com/documentation/server/current/sdk/go/start-using-sdk.html
 * https://github.com/couchbaselabs/devguide-examples/blob/master/go/subdocument.go
 * https://github.com/couchbase/gocb/blob/master/bucket_subdoc_test.go
+* https://gist.github.com/brett19/b6d8906065d51b3eb4c3063f219351dd
