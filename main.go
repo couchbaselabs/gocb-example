@@ -527,12 +527,14 @@ func (e *ExampleApp) ForEachDocIdBucketViews(docProcessor DocProcessor, bucket *
 
 	viewQuery := gocb.NewViewQuery(designDoc, viewName)
 
-	skip := uint(0)
+	var startKey string
 
 	for {
 
+		if startKey != "" {
+			viewQuery.Range(startKey, nil, false)
+		}
 		viewQuery.Limit(pageSizeViewResult)
-		viewQuery.Skip(skip)
 
 		log.Printf("Calling ExecuteViewQuery: %v", viewQuery)
 		viewResults, err := bucket.ExecuteViewQuery(viewQuery)
@@ -570,6 +572,16 @@ func (e *ExampleApp) ForEachDocIdBucketViews(docProcessor DocProcessor, bucket *
 				return fmt.Errorf("Row id field not of expected type")
 			}
 
+			if rowIdStr == startKey {
+				// Don't add the startKey, since it was already added in previous iteration and
+				// we'll get a duplicate key error trying to insert.  The other way to solve
+				// this would be to change the insert -> upsert
+				continue
+			}
+
+			startKey = rowIdStr
+			log.Printf("rowIdStr: %v", rowIdStr)
+
 			// Get row document
 			docRaw, ok := row["value"]
 			if !ok {
@@ -579,7 +591,6 @@ func (e *ExampleApp) ForEachDocIdBucketViews(docProcessor DocProcessor, bucket *
 			docIds = append(docIds, rowIdStr)
 			docs = append(docs, docRaw)
 
-			skip += 1
 			numResultsProcessed += 1
 
 		}
