@@ -32,6 +32,7 @@ const (
 
 	// View result page size
 	// TODO: if this page size too large, it will return "panic: Error: queue overflowed" when doing bulk inserts.  Should handle that case.
+	// See https://issues.couchbase.com/browse/GOCBC-231
 	pageSizeViewResult = 1000
 )
 
